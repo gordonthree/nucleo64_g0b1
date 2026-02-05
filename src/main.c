@@ -25,6 +25,8 @@
 #include <stdio.h>   // For sprintf and snprintf
 #include <stdlib.h>  // For abs
 #include <string.h>  // For memset (if you use it)
+#include "canbus_project.h" /* my various CAN functions and structs */
+
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -92,11 +94,14 @@ static void MX_FDCAN1_Init(void);
 static void MX_USART1_UART_Init(void);
 static void MX_CRC_Init(void);
 static void MX_RTC_Init(void);
+
 void StartDefaultTask(void const * argument);
 void StartLCDTask(void const * argument);
 void StartBlinkTask(void const * argument);
 
 /* USER CODE BEGIN PFP */
+void StartCanRxTask(void const * argument);
+void StartCanTxTask(void const * argument);
 
 /* USER CODE END PFP */
 
@@ -385,7 +390,7 @@ static void MX_FDCAN1_Init(void)
     Error_Handler();
   }
   /* USER CODE BEGIN FDCAN1_Init 2 */
-  FDCAN_FilterConfigTypeDef sFilterConfig;
+  FDCAN_FilterTypeDef sFilterConfig;
 
   // Configure Filter to accept all messages (or specific range)
   sFilterConfig.IdType = FDCAN_STANDARD_ID;
@@ -646,7 +651,6 @@ void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs)
 }
 
 void StartCanRxTask(void const * argument) {
-    char dbg[64];
     for(;;) {
         // Wait for notification from the ISR
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
@@ -680,22 +684,37 @@ void StartCanRxTask(void const * argument) {
 }
 
 void StartCanTxTask(void const * argument) {
-    CAN_Msg_t txMsg;
+    // We don't need the local txMsg buffer anymore because 
+    // we are getting a pointer from the queue event.
     FDCAN_TxHeaderTypeDef txHeader;
 
     for(;;) {
-        if (osMessageGet(canTxQueueHandle, &txMsg, osWaitForever) == osEventMessage) {
-            txHeader.Identifier = txMsg.Identifier;
-            txHeader.IdType = FDCAN_STANDARD_ID;
-            txHeader.TxFrameType = FDCAN_DATA_FRAME;
-            txHeader.DataLength = FDCAN_DLC_BYTES_8; // Adjust based on txMsg.DLC
+        // 1. Capture the event in a variable so we can access its value
+        osEvent event = osMessageGet(canTxQueueHandle, osWaitForever);
+
+        if (event.status == osEventMessage) {
+            // 2. Cast the value to our pointer type
+            // Note: This assumes you sent a pointer to the queue 
+            // OR the struct is small enough to fit in the value field.
+            CAN_Msg_t *ptrMsg = (CAN_Msg_t*)event.value.p;
+
+            // 3. Assign Header values using the GLOBAL FDCAN constants
+            txHeader.Identifier = ptrMsg->Identifier;
+            txHeader.IdType = FDCAN_STANDARD_ID;      // Hardware constant
+            txHeader.TxFrameType = FDCAN_DATA_FRAME;   // Hardware constant
+            
+            // Set DLC. Since ptrMsg has a DLC field, you can use it, 
+            // but FDCAN uses specific macros for the field.
+            txHeader.DataLength = FDCAN_DLC_BYTES_8; 
+            
             txHeader.ErrorStateIndicator = FDCAN_ESI_ACTIVE;
             txHeader.BitRateSwitch = FDCAN_BRS_OFF;
             txHeader.FDFormat = FDCAN_CLASSIC_CAN;
             txHeader.TxEventFifoControl = FDCAN_NO_TX_EVENTS;
             txHeader.MessageMarker = 0;
 
-            HAL_FDCAN_AddMessageToTxFifoQ(&hfdcan1, &txHeader, txMsg.Data);
+            // 4. Send the message using the data from the pointer
+            HAL_FDCAN_AddMessageToTxFifoQ(&hfdcan1, &txHeader, ptrMsg->Data);
         }
     }
 }
@@ -722,7 +741,7 @@ void StartDefaultTask(void const * argument)
   uid[2] = HAL_GetUIDw2();
 
   // We use HAL_CRC_Calculate which handles the peripheral state and returns the 32-bit result
-  uint32_t board_crc = HAL_CRC_Calculate(&hcrc, uid, 3);
+  board_crc = HAL_CRC_Calculate(&hcrc, uid, 3);
 
   // 2. Identify which binary we are running using the PIO build flag
   // We use a default value (0) in case the flag isn't defined
@@ -732,13 +751,13 @@ void StartDefaultTask(void const * argument)
 
   osDelay(1000);
 
-  int len = snprintf(msg, sizeof(msg), 
-            "\r\n--- DEVICE IDENTITY ---\r\n"
-            "PIO ENV ID: %d\r\n"
-            "Chip UID: %08X-%08X-%08X\r\n"
-            "UNIQUE CRC:  0x%08X\r\n"
-            "-----------------------\r\n\r\n", 
-            (int)BOARD_ID, (unsigned int)uid[0], (unsigned int)uid[1], (unsigned int)uid[2], (unsigned int)board_crc);
+  snprintf(msg, sizeof(msg), 
+          "\r\n--- DEVICE IDENTITY ---\r\n"
+          "PIO ENV ID: %d\r\n"
+          "Chip UID: %08X-%08X-%08X\r\n"
+          "UNIQUE CRC:  0x%08X\r\n"
+          "-----------------------\r\n\r\n", 
+          (int)BOARD_ID, (unsigned int)uid[0], (unsigned int)uid[1], (unsigned int)uid[2], (unsigned int)board_crc);
 
   SecureDebug(msg); // Print to UART2
 
@@ -756,7 +775,7 @@ void StartDefaultTask(void const * argument)
 
     // 2. Format the string
     // %lu is used for unsigned long (uint32_t)
-    int len = snprintf(msg, sizeof(msg), "Uptime: %u sec\r\n", tick);
+    snprintf(msg, sizeof(msg), "Uptime: %u sec\r\n", tick);
 
     // 3. Transmit over UART2
     SecureDebug(msg); // Print to UART2
@@ -823,8 +842,8 @@ void StartLCDTask(void const * argument)
     int t_dec = abs(temp_scaled % 10);
 
     /* --- Printing --- */
-    int len = snprintf(msg, sizeof(msg), "\r\nA1:%u T:%d.%dC\r\n", 
-                        (unsigned int)rawAn1, t_int, t_dec);
+    snprintf(msg, sizeof(msg), "\r\nA1:%u T:%d.%dC\r\n", 
+              (unsigned int)rawAn1, t_int, t_dec);
 
     SecureDebug(msg); // Print to UART2
 
