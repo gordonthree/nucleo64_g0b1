@@ -29,12 +29,22 @@
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
-
+typedef struct {
+    uint32_t Identifier;
+    uint8_t  Data[8];
+    uint8_t  DLC;
+} CAN_Msg_t;
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+#define CAN_ID_ERROR_OVER_CURRENT 0x100
+#define CAN_ID_SW_SET_OFF         0x113
+#define CAN_ID_SW_SET_ON          0x114
+#define CAN_ID_SW_SET_PWM_DUTY    0x117
 
+// Board ID (calculated in DefaultTask, we'll make it global)
+extern uint32_t board_crc;
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -61,8 +71,15 @@ osThreadId blinkTaskHandle;
 /* USER CODE BEGIN PV */
 // Must be global or static so the DMA can find it in RAM
 volatile uint16_t adc_buffer[2];
+osThreadId canRxTaskHandle;
+osThreadId canTxTaskHandle;
+osMessageQId canTxQueueHandle;
 osMutexId uartMutexHandle; // CMSIS-RTOS handle
 osMutexDef(uartMutex);
+
+uint32_t board_crc = 0; // Global to allow CAN task to verify Remote ID
+FDCAN_RxHeaderTypeDef rxHeader;
+uint8_t rxData[8];
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -141,7 +158,8 @@ int main(void)
   /* USER CODE END RTOS_TIMERS */
 
   /* USER CODE BEGIN RTOS_QUEUES */
-  /* add queues, ... */
+  osMessageQDef(canTxQueue, 10, CAN_Msg_t);
+  canTxQueueHandle = osMessageCreate(osMessageQ(canTxQueue), NULL);
   /* USER CODE END RTOS_QUEUES */
 
   /* Create the thread(s) */
@@ -158,7 +176,11 @@ int main(void)
   blinkTaskHandle = osThreadCreate(osThread(blinkTask), NULL);
 
   /* USER CODE BEGIN RTOS_THREADS */
-  /* add threads, ... */
+  osThreadDef(canRxTask, StartCanRxTask, osPriorityHigh, 0, 256);
+  canRxTaskHandle = osThreadCreate(osThread(canRxTask), NULL);
+
+  osThreadDef(canTxTask, StartCanTxTask, osPriorityNormal, 0, 256);
+  canTxTaskHandle = osThreadCreate(osThread(canTxTask), NULL);  
   /* USER CODE END RTOS_THREADS */
 
   /* Start scheduler */
@@ -363,7 +385,28 @@ static void MX_FDCAN1_Init(void)
     Error_Handler();
   }
   /* USER CODE BEGIN FDCAN1_Init 2 */
+  FDCAN_FilterConfigTypeDef sFilterConfig;
 
+  // Configure Filter to accept all messages (or specific range)
+  sFilterConfig.IdType = FDCAN_STANDARD_ID;
+  sFilterConfig.FilterIndex = 0;
+  sFilterConfig.FilterType = FDCAN_FILTER_RANGE;
+  sFilterConfig.FilterConfig = FDCAN_FILTER_TO_RXFIFO0;
+  sFilterConfig.FilterID1 = 0x100; // Accept from Error IDs
+  sFilterConfig.FilterID2 = 0x7FF; // up to Interface IDs
+  if (HAL_FDCAN_ConfigFilter(&hfdcan1, &sFilterConfig) != HAL_OK) {
+      Error_Handler();
+  }
+
+  // Start FDCAN
+  if (HAL_FDCAN_Start(&hfdcan1) != HAL_OK) {
+      Error_Handler();
+  }
+
+  // Activate the notification for new messages in FIFO 0
+  if (HAL_FDCAN_ActivateNotification(&hfdcan1, FDCAN_IT_RX_FIFO0_NEW_MESSAGE, 0) != HAL_OK) {
+      Error_Handler();
+  }
   /* USER CODE END FDCAN1_Init 2 */
 
 }
@@ -585,9 +628,75 @@ static void MX_GPIO_Init(void)
 /* USER CODE BEGIN 4 */
 
 void SecureDebug(char* buffer) {
-    if (osMutexWait(uartMutexHandle, osWaitForever) == osOK) {
-        HAL_UART_Transmit(&huart2, (uint8_t*)buffer, strlen(buffer), 10);
-        osMutexRelease(uartMutexHandle);
+  if (osMutexWait(uartMutexHandle, osWaitForever) == osOK) {
+      HAL_UART_Transmit(&huart2, (uint8_t*)buffer, strlen(buffer), 10);
+      osMutexRelease(uartMutexHandle);
+  }
+}
+
+
+// This callback runs in IRQ context when a CAN message arrives
+void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs) {
+    if ((RxFifo0ITs & FDCAN_IT_RX_FIFO0_NEW_MESSAGE) != 0) {
+        // Wake up the RX Task
+        BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+        vTaskNotifyGiveFromISR(canRxTaskHandle, &xHigherPriorityTaskWoken);
+        portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
+    }
+}
+
+void StartCanRxTask(void const * argument) {
+    char dbg[64];
+    for(;;) {
+        // Wait for notification from the ISR
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+
+        while (HAL_FDCAN_GetRxMessage(&hfdcan1, FDCAN_RX_FIFO0, &rxHeader, rxData) == HAL_OK) {
+            // 1. Extract Remote ID (Bytes 0-3 as per your CSV)
+            uint32_t msgRemoteId = (rxData[0]) | (rxData[1] << 8) | (rxData[2] << 16) | (rxData[3] << 24);
+
+            // 2. Check if this message is intended for this board
+            if (msgRemoteId == board_crc) {
+                uint8_t switchId = rxData[4]; // Byte 4 is switch id in CSV
+
+                switch (rxHeader.Identifier) {
+                    case CAN_ID_SW_SET_ON:
+                        // Example: Toggle LED or Load based on switchId
+                        HAL_GPIO_WritePin(LED_GREEN_GPIO_Port, LED_GREEN_Pin, GPIO_PIN_SET);
+                        SecureDebug("CAN: Load ON\r\n");
+                        break;
+
+                    case CAN_ID_SW_SET_OFF:
+                        HAL_GPIO_WritePin(LED_GREEN_GPIO_Port, LED_GREEN_Pin, GPIO_PIN_RESET);
+                        SecureDebug("CAN: Load OFF\r\n");
+                        break;
+                        
+                    default:
+                        break;
+                }
+            }
+        }
+    }
+}
+
+void StartCanTxTask(void const * argument) {
+    CAN_Msg_t txMsg;
+    FDCAN_TxHeaderTypeDef txHeader;
+
+    for(;;) {
+        if (osMessageGet(canTxQueueHandle, &txMsg, osWaitForever) == osEventMessage) {
+            txHeader.Identifier = txMsg.Identifier;
+            txHeader.IdType = FDCAN_STANDARD_ID;
+            txHeader.TxFrameType = FDCAN_DATA_FRAME;
+            txHeader.DataLength = FDCAN_DLC_BYTES_8; // Adjust based on txMsg.DLC
+            txHeader.ErrorStateIndicator = FDCAN_ESI_ACTIVE;
+            txHeader.BitRateSwitch = FDCAN_BRS_OFF;
+            txHeader.FDFormat = FDCAN_CLASSIC_CAN;
+            txHeader.TxEventFifoControl = FDCAN_NO_TX_EVENTS;
+            txHeader.MessageMarker = 0;
+
+            HAL_FDCAN_AddMessageToTxFifoQ(&hfdcan1, &txHeader, txMsg.Data);
+        }
     }
 }
 
