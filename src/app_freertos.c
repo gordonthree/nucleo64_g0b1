@@ -312,13 +312,13 @@ void StartCanRxTask(void const * argument) {
                 // uint8_t switchId = rxData[4]; // Byte 4 is switch id in CSV
 
                 switch (rxHeader.Identifier) {
-                    case SW_SET_ON:
+                    case CAN_ID_SW_SET_ON:
                         // Example: Toggle LED or Load based on switchId
                         HAL_GPIO_WritePin(LED_GREEN_GPIO_Port, LED_GREEN_Pin, GPIO_PIN_SET);
                         SecureDebug("CAN: Load ON\r\n");
                         break;
 
-                    case SW_SET_OFF:
+                    case CAN_ID_SW_SET_OFF:
                         HAL_GPIO_WritePin(LED_GREEN_GPIO_Port, LED_GREEN_Pin, GPIO_PIN_RESET);
                         SecureDebug("CAN: Load OFF\r\n");
                         break;

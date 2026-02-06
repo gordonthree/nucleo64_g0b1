@@ -40,19 +40,6 @@
 #include "canbus_project.h" /* my various CAN functions and structs */
 #include "typedef.h"
 
-/* USER CODE END Includes */
-
-/* Private typedef -----------------------------------------------------------*/
-/* USER CODE BEGIN PTD */
-
-/* USER CODE END PTD */
-
-/* Private define ------------------------------------------------------------*/
-/* USER CODE BEGIN PD */
-#define CAN_ID_ERROR_OVER_CURRENT 0x100
-#define CAN_ID_SW_SET_OFF         0x113
-#define CAN_ID_SW_SET_ON          0x114
-#define CAN_ID_SW_SET_PWM_DUTY    0x117
 
 // Board ID (calculated in DefaultTask, we'll make it global)
 extern uint32_t board_crc;
