@@ -44,24 +44,7 @@
  *----------------------------------------------------------*/
 
 /* USER CODE BEGIN Includes */
-/* Cortex-M specific definitions. */
-#ifdef __NVIC_PRIO_BITS
- /* __BVC_PRIO_BITS will be specified when CMSIS is being used. */
- #define configPRIO_BITS         __NVIC_PRIO_BITS
-#else
- #define configPRIO_BITS         2    /* STM32G0 has 2 bits (4 priority levels) */
-#endif
-
-/* The lowest interrupt priority that can be used in a call to a "set priority" function. */
-#define configLIBRARY_LOWEST_INTERRUPT_PRIORITY      3
-
-/* The highest interrupt priority that can be used by any interrupt service routine that makes calls to interrupt safe FreeRTOS API functions. */
-#define configLIBRARY_MAX_SYSCALL_INTERRUPT_PRIORITY 1
-
-/* Interrupt priorities used by the kernel port layer itself. */
-#define configKERNEL_INTERRUPT_PRIORITY         ( configLIBRARY_LOWEST_INTERRUPT_PRIORITY << (8 - configPRIO_BITS) )
-#define configMAX_SYSCALL_INTERRUPT_PRIORITY    ( configLIBRARY_MAX_SYSCALL_INTERRUPT_PRIORITY << (8 - configPRIO_BITS) )
-
+/* Section where include file can be added */
 /* USER CODE END Includes */
 
 /* Ensure definitions are only used by the compiler, and not by the assembler. */
@@ -81,7 +64,7 @@
 #define configTICK_RATE_HZ                       ((TickType_t)1000)
 #define configMAX_PRIORITIES                     ( 7 )
 #define configMINIMAL_STACK_SIZE                 ((uint16_t)128)
-#define configTOTAL_HEAP_SIZE                    ((size_t)16000)
+#define configTOTAL_HEAP_SIZE                    ((size_t)16384)
 #define configMAX_TASK_NAME_LEN                  ( 16 )
 #define configUSE_16_BIT_TICKS                   0
 #define configUSE_MUTEXES                        1
@@ -96,6 +79,9 @@
 /* Co-routine definitions. */
 #define configUSE_CO_ROUTINES                    0
 #define configMAX_CO_ROUTINE_PRIORITIES          ( 2 )
+
+/* The following flag must be enabled only when using newlib */
+#define configUSE_NEWLIB_REENTRANT          1
 
 /* Set the following definitions to 1 to include the API function, or zero
 to exclude the API function. */

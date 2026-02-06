@@ -50,6 +50,8 @@ void NMI_Handler(void);
 void HardFault_Handler(void);
 void DMA1_Channel1_IRQHandler(void);
 void TIM2_IRQHandler(void);
+void TIM16_FDCAN_IT0_IRQHandler(void);
+void TIM17_FDCAN_IT1_IRQHandler(void);
 /* USER CODE BEGIN EFP */
 
 /* USER CODE END EFP */
