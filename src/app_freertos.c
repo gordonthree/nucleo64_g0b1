@@ -29,7 +29,9 @@ osMutexDef(uartMutex);
 extern uint16_t adc_buffer[2];           // From main.c or adc.c
 extern FDCAN_RxHeaderTypeDef rxHeader;   // From main.c or fdcan.c
 extern uint8_t rxData[8];                // From main.c or fdcan.c
- 
+
+struct canNodeInfo nodeInfo; /** information about this node */
+
 osThreadId defaultTaskHandle;
 osThreadId lcdTaskHandle;
 osThreadId blinkTaskHandle;
@@ -47,6 +49,7 @@ void StartLCDTask(void const * argument);
 void StartBlinkTask(void const * argument);
 void StartCanRxTask(void const * argument);
 void StartCanTxTask(void const * argument);
+void txIntroduction(int ptr);
 
 void MX_FREERTOS_Init(void); /* (MISRA C 2004 rule 8.1) */
 
