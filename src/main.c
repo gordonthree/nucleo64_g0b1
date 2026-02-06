@@ -41,7 +41,7 @@
 #include "typedef.h"
 
 
-// Board ID (calculated in DefaultTask, we'll make it global)
+// Calculated in DefaultTask, we'll bring it in here as well
 extern uint32_t board_crc;
 
 extern osThreadId defaultTaskHandle;

@@ -1,22 +1,3 @@
-/* USER CODE BEGIN Header */
-/**
-  ******************************************************************************
-  * File Name          : app_freertos.c
-  * Description        : Code for freertos applications
-  ******************************************************************************
-  * @attention
-  *
-  * Copyright (c) 2026 STMicroelectronics.
-  * All rights reserved.
-  *
-  * This software is licensed under terms that can be found in the LICENSE file
-  * in the root directory of this software component.
-  * If no LICENSE file comes with this software, it is provided AS-IS.
-  *
-  ******************************************************************************
-  */
-/* USER CODE END Header */
-
 /* Includes ------------------------------------------------------------------*/
 #include <stdio.h>   // For sprintf and snprintf
 #include <stdlib.h>  // For abs
@@ -38,29 +19,8 @@
 #include "securedebug.h"
 #include "usart.h"
 
-/* Private includes ----------------------------------------------------------*/
-/* USER CODE BEGIN Includes */
-
-/* USER CODE END Includes */
-
-/* Private typedef -----------------------------------------------------------*/
-/* USER CODE BEGIN PTD */
-
-/* USER CODE END PTD */
-
-/* Private define ------------------------------------------------------------*/
-/* USER CODE BEGIN PD */
-
-/* USER CODE END PD */
-
-/* Private macro -------------------------------------------------------------*/
-/* USER CODE BEGIN PM */
-
-/* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
-/* USER CODE BEGIN Variables */
-// Board ID (calculated in DefaultTask, we'll make it global)
 uint32_t board_crc;
 
 osMutexId uartMutexHandle; // CMSIS-RTOS handle
@@ -81,9 +41,6 @@ osMessageQId canTxQueueHandle;
 
 
 /* Private function prototypes -----------------------------------------------*/
-/* USER CODE BEGIN FunctionPrototypes */
-
-/* USER CODE END FunctionPrototypes */
 
 void StartDefaultTask(void const * argument);
 void StartLCDTask(void const * argument);
@@ -108,30 +65,14 @@ void MX_FREERTOS_Init(void) {
   uid[1] = HAL_GetUIDw1();
   uid[2] = HAL_GetUIDw2();
   board_crc = HAL_CRC_Calculate(&hcrc, uid, 3);
-  /* USER CODE END Init */
 
   /* USER CODE BEGIN RTOS_MUTEX */
   uartMutexHandle = osMutexCreate(osMutex(uartMutex));
-  /* USER CODE END RTOS_MUTEX */
 
-  /* USER CODE BEGIN RTOS_SEMAPHORES */
-  /* add semaphores, ... */
-  /* USER CODE END RTOS_SEMAPHORES */
-
-  /* USER CODE BEGIN RTOS_TIMERS */
-  /* start timers, add new ones, ... */
-  /* USER CODE END RTOS_TIMERS */
-
-  /* Create the queue(s) */
-  /* definition and creation of canTxQueue */
   // Use a pointer type for the queue. osMessagePut only supports 32-bit values.
   // Passing a large struct by value here would result in stack corruption/garbage data.
   osMessageQDef(canTxQueue, 10, CAN_Msg_t*);
   canTxQueueHandle = osMessageCreate(osMessageQ(canTxQueue), NULL);
-
-  /* USER CODE BEGIN RTOS_QUEUES */
-  /* add queues, ... */
-  /* USER CODE END RTOS_QUEUES */
 
   /* Create the thread(s) */
   /* definition and creation of defaultTask */
@@ -154,11 +95,23 @@ void MX_FREERTOS_Init(void) {
   osThreadDef(canTxTask, StartCanTxTask, osPriorityNormal, 0, 256);
   canTxTaskHandle = osThreadCreate(osThread(canTxTask), NULL);
 
-  /* USER CODE BEGIN RTOS_THREADS */
-  /* add threads, ... */
-  /* USER CODE END RTOS_THREADS */
-
+  
 }
+
+/* --- Refactored Introduction Logic --- */
+static void txIntroduction(int ptr) {
+    CAN_Msg_t newMsg; // Temporary struct to push to Queue
+    
+    if (ptr <= 0) {
+        newMsg.Identifier = nodeInfo.nodeType;
+        // Map nodeInfo.nodeID to newMsg.Data...
+        memcpy(newMsg.Data, nodeInfo.nodeID, 4);
+        osMessagePut(canTxQueueHandle, (uint32_t)&newMsg, 0);
+    } 
+    // ... Implement remaining module ptr logic similarly using osMessagePut
+}
+/* USER CODE BEGIN RTOS_THREADS */
+
 
 /* USER CODE BEGIN Header_StartDefaultTask */
 /**
