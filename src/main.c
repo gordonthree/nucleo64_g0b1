@@ -51,12 +51,11 @@ extern osThreadId blinkTaskHandle;
 extern osThreadId canTxTaskHandle;
 extern osThreadId canRxTaskHandle;
 
-osMessageQId canTxQueueHandle;
+extern osMessageQId canTxQueueHandle;
 
 /* USER CODE BEGIN PV */
 // Must be global or static so the DMA can find it in RAM
 volatile uint16_t adc_buffer[2];
-uint32_t board_crc = 0; // Global to allow CAN task to verify Remote ID
 uint8_t rxData[8];
 /* USER CODE END PV */
 
@@ -185,10 +184,12 @@ void SystemClock_Config(void)
 // This callback runs in IRQ context when a CAN message arrives
 void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs) {
     if ((RxFifo0ITs & FDCAN_IT_RX_FIFO0_NEW_MESSAGE) != 0) {
-        // Wake up the RX Task
-        BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-        vTaskNotifyGiveFromISR(canRxTaskHandle, &xHigherPriorityTaskWoken);
-        portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
+        // Wake up the RX Task, ensure handle is valid
+        if (canRxTaskHandle != NULL) {
+            BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+            vTaskNotifyGiveFromISR(canRxTaskHandle, &xHigherPriorityTaskWoken);
+            portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
+        }
     }
 }
 

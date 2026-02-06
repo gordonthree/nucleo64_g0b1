@@ -101,6 +101,13 @@ void MX_FREERTOS_Init(void); /* (MISRA C 2004 rule 8.1) */
 void MX_FREERTOS_Init(void) {
   /* USER CODE BEGIN Init */
 
+  // Calculate Board ID here to ensure it is ready before any task starts.
+  // This prevents a race condition where StartCanRxTask (High Prio) reads it as 0.
+  uint32_t uid[3];
+  uid[0] = HAL_GetUIDw0();
+  uid[1] = HAL_GetUIDw1();
+  uid[2] = HAL_GetUIDw2();
+  board_crc = HAL_CRC_Calculate(&hcrc, uid, 3);
   /* USER CODE END Init */
 
   /* USER CODE BEGIN RTOS_MUTEX */
@@ -117,7 +124,9 @@ void MX_FREERTOS_Init(void) {
 
   /* Create the queue(s) */
   /* definition and creation of canTxQueue */
-  osMessageQDef(canTxQueue, 10, CAN_Msg_t);
+  // Use a pointer type for the queue. osMessagePut only supports 32-bit values.
+  // Passing a large struct by value here would result in stack corruption/garbage data.
+  osMessageQDef(canTxQueue, 10, CAN_Msg_t*);
   canTxQueueHandle = osMessageCreate(osMessageQ(canTxQueue), NULL);
 
   /* USER CODE BEGIN RTOS_QUEUES */
@@ -163,12 +172,10 @@ void StartDefaultTask(void const * argument)
   /* USER CODE BEGIN StartDefaultTask */
   static char msg[256]; // Buffer to hold the string
   static uint32_t uid[3]; // Buffer to hold the UID
+  // Re-read UID for display purposes (board_crc is already calculated in Init)
   uid[0] = HAL_GetUIDw0();
   uid[1] = HAL_GetUIDw1();
   uid[2] = HAL_GetUIDw2();
-
-  // We use HAL_CRC_Calculate which handles the peripheral state and returns the 32-bit result
-  board_crc = HAL_CRC_Calculate(&hcrc, uid, 3);
 
   // 2. Identify which binary we are running using the PIO build flag
   // We use a default value (0) in case the flag isn't defined
@@ -261,8 +268,8 @@ void StartLCDTask(void const * argument)
     int32_t delta_ADC = rawTemp_30V - (int32_t)(*TS_CAL1);
 
     // 3. Scale and divide
-    // (110 - 30) = 80. We multiply by 10 to get one decimal place (800)
-    int32_t temp_scaled = (delta_ADC * 800) / (int32_t)(*TS_CAL2 - *TS_CAL1) + 300;
+    // STM32G0 TS_CAL2 is at 130C. Range is (130 - 30) = 100. Multiply by 10 for decimal (1000).
+    int32_t temp_scaled = (delta_ADC * 1000) / (int32_t)(*TS_CAL2 - *TS_CAL1) + 300;
 
     int t_int = temp_scaled / 10;
     int t_dec = abs(temp_scaled % 10);
@@ -366,4 +373,3 @@ void StartCanTxTask(void const * argument) {
         }
     }
 }
-
