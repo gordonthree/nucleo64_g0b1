@@ -3,55 +3,53 @@
 #include <stdlib.h>  // For abs
 #include <string.h>  // For memset (if you use it)
 #include "canbus_project.h" /* my various CAN functions and structs */
-#include "typedef.h"
 
 #include "FreeRTOS.h"
-#include "task.h"
 #include "main.h"
-#include "cmsis_os.h"
-#include "typedef.h"
-#include "crc.h"
-#include "adc.h"
-#include "fdcan.h"
-#include "dma.h"
-#include "gpio.h"
-#include "rtc.h"
-#include "securedebug.h"
-#include "usart.h"
 
 
 /* Private variables ---------------------------------------------------------*/
-uint32_t board_crc;
+uint8_t introMsgPtr; /**< pointer for intro messages */
+
+extern uint32_t board_crc; 
 
 osMutexId uartMutexHandle; // CMSIS-RTOS handle
 osMutexDef(uartMutex);
 
-extern uint16_t adc_buffer[2];           // From main.c or adc.c
-extern FDCAN_RxHeaderTypeDef rxHeader;   // From main.c or fdcan.c
-extern uint8_t rxData[8];                // From main.c or fdcan.c
+extern uint16_t adc_buffer[2];           
+extern FDCAN_RxHeaderTypeDef rxHeader;   
+extern uint8_t rxData[8];                
 
-struct canNodeInfo nodeInfo; /** information about this node */
+struct canNodeInfo nodeInfo; /**< Store information about this node */
 
+/* Create the handles for RTOS tasks*/
 osThreadId defaultTaskHandle;
-osThreadId lcdTaskHandle;
-osThreadId blinkTaskHandle;
-
 osThreadId canTxTaskHandle;
 osThreadId canRxTaskHandle;
 
-osMessageQId canTxQueueHandle;
+/* Define the message pool: 16 blocks of type CAN_Msg_t */
+osPoolId canMsgPoolHandle;
+osPoolDef(canMsgPool, 16, CAN_Msg_t); 
 
+/* Define the TX pointer queue: 16 slots, each holding a POINTER (uint32_t) */
+osMessageQId canTxQueueHandle;
+osMessageQDef(canTxQueue, 16, uint32_t);
+
+/* Define the RX pointer queue: 16 slots, each holding a POINTER (uint32_t) */
+osMessageQId canRxQueueHandle;
+osMessageQDef(canRxQueue, 16, uint32_t);
+
+/* Global function prototypes -----------------------------------------------*/
+
+void StartDefaultTask(void const * argument);
+void StartCanRxTask(void const * argument);
+void StartCanTxTask(void const * argument);
+
+void MX_FREERTOS_Init(void); /* (MISRA C 2004 rule 8.1) */
 
 /* Private function prototypes -----------------------------------------------*/
 
-void StartDefaultTask(void const * argument);
-void StartLCDTask(void const * argument);
-void StartBlinkTask(void const * argument);
-void StartCanRxTask(void const * argument);
-void StartCanTxTask(void const * argument);
-void txIntroduction(int ptr);
-
-void MX_FREERTOS_Init(void); /* (MISRA C 2004 rule 8.1) */
+static void txIntroduction(void); /**< Function to send data about this node to the can bus */
 
 /**
   * @brief  FreeRTOS initialization
@@ -62,33 +60,23 @@ void MX_FREERTOS_Init(void) {
   /* USER CODE BEGIN Init */
 
   // Calculate Board ID here to ensure it is ready before any task starts.
-  // This prevents a race condition where StartCanRxTask (High Prio) reads it as 0.
-  uint32_t uid[3];
-  uid[0] = HAL_GetUIDw0();
-  uid[1] = HAL_GetUIDw1();
-  uid[2] = HAL_GetUIDw2();
-  board_crc = HAL_CRC_Calculate(&hcrc, uid, 3);
+  board_crc = NodeID_GetU32();
 
-  /* USER CODE BEGIN RTOS_MUTEX */
+
+  /* BEGIN RTOS_MUTEX */
   uartMutexHandle = osMutexCreate(osMutex(uartMutex));
 
-  // Use a pointer type for the queue. osMessagePut only supports 32-bit values.
-  // Passing a large struct by value here would result in stack corruption/garbage data.
-  osMessageQDef(canTxQueue, 10, CAN_Msg_t*);
+  /* Create the Memory Pool */
+  canMsgPoolHandle = osPoolCreate(osPool(canMsgPool));
+
+  /* Create the Message Queue */
   canTxQueueHandle = osMessageCreate(osMessageQ(canTxQueue), NULL);
+  canRxQueueHandle = osMessageCreate(osMessageQ(canRxQueue), NULL);
+  /* END RTOS_MUTEX */
 
   /* Create the thread(s) */
-  /* definition and creation of defaultTask */
   osThreadDef(defaultTask, StartDefaultTask, osPriorityNormal, 0, 512);
   defaultTaskHandle = osThreadCreate(osThread(defaultTask), NULL);
-
-  /* definition and creation of lcdTask */
-  osThreadDef(lcdTask, StartLCDTask, osPriorityLow, 0, 768);
-  lcdTaskHandle = osThreadCreate(osThread(lcdTask), NULL);
-
-  /* definition and creation of blinkTask */
-  osThreadDef(blinkTask, StartBlinkTask, osPriorityLow, 0, 128);
-  blinkTaskHandle = osThreadCreate(osThread(blinkTask), NULL);
 
   /* definition and creation of canRxTask */
   osThreadDef(canRxTask, StartCanRxTask, osPriorityHigh, 0, 256);
@@ -97,22 +85,90 @@ void MX_FREERTOS_Init(void) {
   /* definition and creation of canTxTask */
   osThreadDef(canTxTask, StartCanTxTask, osPriorityNormal, 0, 256);
   canTxTaskHandle = osThreadCreate(osThread(canTxTask), NULL);
-
-  
 }
 
-/* --- Refactored Introduction Logic --- */
-static void txIntroduction(int ptr) {
-    CAN_Msg_t newMsg; // Temporary struct to push to Queue
-    
-    if (ptr <= 0) {
-        newMsg.Identifier = nodeInfo.nodeType;
-        // Map nodeInfo.nodeID to newMsg.Data...
-        memcpy(newMsg.Data, nodeInfo.nodeID, 4);
-        osMessagePut(canTxQueueHandle, (uint32_t)&newMsg, 0);
+
+/* --- Node Introduction Logic --- */
+static void txIntroduction(void) {
+    if (FLAG_SEND_INTRODUCTION == false) return; /**< If we're not supposed to send an intro, don't */
+
+    char msg[64] __attribute__((aligned(8)));
+    CAN_Msg_t *pNew = (CAN_Msg_t*)osPoolAlloc(canMsgPoolHandle); /* Allocate from Pool (Non-blocking) */
+    if (pNew == NULL) {
+      SecureDebug(("TX INTRO: Pool Error\r\n"));
+      return;
+    }
+    uint16_t txMsgID = 0;
+    uint8_t payload[2] = {0};
+
+    // --- STEP 0: Introduce the Node itself ---
+    if (introMsgPtr == 0) {
+        txMsgID = nodeInfo.nodeTypeMsg; // Retrieve node type aka can message ID
+        if (txMsgID == 0) {
+            osPoolFree(canMsgPoolHandle, pNew); /* Release unused pool block */
+            return;
+        }
+        snprintf(msg, sizeof(msg), "TX INTRO: NODE INTRO Type %03x\r\n", txMsgID);
+        SecureDebug(msg);
+        // SecureDebug("TX: NODE INTRO Type %03x\r\n", txMsgID);
+        
+        // Send the feature mask
+        payload[0] = nodeInfo.featureMask[0]; 
+        payload[1] = nodeInfo.featureMask[1];    
     } 
-    // ... Implement remaining module ptr logic similarly using osMessagePut
+    // --- STEP 1+: Introduce Sub-Modules ---
+    else {
+        uint8_t modIdx = (uint8_t)(introMsgPtr - 1); // Sub-modules start at ptr 1
+        
+        if (modIdx >= nodeInfo.subModCnt) {
+            osPoolFree(canMsgPoolHandle, pNew); /* Release unused pool block */
+            FLAG_SEND_INTRODUCTION = false; // We've reached the end
+            return;
+        }
+
+        txMsgID = nodeInfo.subModules[modIdx].modTypeMsg; // Retrieve module type aka can message ID
+        
+        if (txMsgID == 0) {
+            osPoolFree(canMsgPoolHandle, pNew); /* Release unused pool block */
+            introMsgPtr++; /* Error condition, skip empty slot and move to next */
+            return;
+        }
+        snprintf(msg, sizeof(msg), "TX INTRO: MOD INTRO Type %03x at Idx %i\r\n", txMsgID, modIdx);
+        SecureDebug(msg);
+        // SecureDebug("TX: MOD INTRO Type %03x at Idx %i\r\n", txMsgID, modIdx);
+        
+        if (nodeInfo.subModules[modIdx].sendFeatureMask) {
+            // Send the feature mask
+            payload[0] = nodeInfo.subModules[modIdx].featureMask[0];
+            payload[1] = nodeInfo.subModules[modIdx].featureMask[1];
+        }
+    }
+
+    /* Assemble the final 8-byte CAN Frame */
+    pNew->canID = txMsgID;
+
+    /* Get a pointer to the start of the payload as a byte array */
+    uint8_t *pData = (uint8_t*)&pNew->payload; 
+
+    /*  Bytes 0-3: Hardware Node ID (CRC32) */
+    *(uint32_t*)&pData[0] = nodeInfo.nodeID;
+
+    /* Bytes 4-5: Feature Mask */
+    pData[4] = payload[0];
+    pData[5] = payload[1];
+
+    /* Bytes 6-7: Padding */
+    pData[6] = 0;
+    pData[7] = 0;
+
+    pNew->DLC = 8;
+
+    /* Push the POINTER to the queue */
+    if (osMessagePut(canTxQueueHandle, (uint32_t)pNew, 0) != osOK) {
+        osPoolFree(canMsgPoolHandle, pNew); /* Release unused pool block */
+    }
 }
+
 /* USER CODE BEGIN RTOS_THREADS */
 
 
@@ -126,51 +182,64 @@ static void txIntroduction(int ptr) {
 void StartDefaultTask(void const * argument)
 {
   /* USER CODE BEGIN StartDefaultTask */
-  static char msg[256]; // Buffer to hold the string
-  static uint32_t uid[3]; // Buffer to hold the UID
-  // Re-read UID for display purposes (board_crc is already calculated in Init)
-  uid[0] = HAL_GetUIDw0();
-  uid[1] = HAL_GetUIDw1();
-  uid[2] = HAL_GetUIDw2();
+  static char msg[256]; /* Buffer to hold message strings */
+  introMsgPtr = 0; /* Reset the pointer */
+  FLAG_SEND_INTRODUCTION = true; /* Set flag to send the introduction*/
 
-  // 2. Identify which binary we are running using the PIO build flag
-  // We use a default value (0) in case the flag isn't defined
-  #ifndef BOARD_ID
-    #define BOARD_ID 0
-  #endif
+  /* Initialize nodeInfo */
+  nodeInfo.nodeID = NodeID_GetU32(); 
+  nodeInfo.nodeTypeMsg = BOX_MULTI_IO_ID;
+  nodeInfo.subModCnt = 2;
 
-  osDelay(1000);
+  nodeInfo.subModules[0].modTypeMsg = INPUT_ANALOG_KNOB_ID;
+  nodeInfo.subModules[0].modTypeDLC = INPUT_ANALOG_KNOB_DLC;
+  nodeInfo.subModules[0].dataSize = 2; // 2 bytes
+  nodeInfo.subModules[0].sendFeatureMask = false;
 
-  snprintf(msg, sizeof(msg), 
-          "\r\n--- DEVICE IDENTITY ---\r\n"
-          "PIO ENV ID: %d\r\n"
-          "Chip UID: %08X-%08X-%08X\r\n"
-          "UNIQUE CRC:  0x%08X\r\n"
-          "-----------------------\r\n\r\n", 
-          (int)BOARD_ID, (unsigned int)uid[0], (unsigned int)uid[1], (unsigned int)uid[2], (unsigned int)board_crc);
-
-  SecureDebug(msg); // Print to UART2
+  nodeInfo.subModules[1].modTypeMsg = NODE_CPU_TEMP_ID;
+  nodeInfo.subModules[1].modTypeDLC = NODE_CPU_TEMP_DLC;
+  nodeInfo.subModules[1].dataSize = 2; // 2 bytes
+  nodeInfo.subModules[1].sendFeatureMask = false;
 
   osDelay(2000);
 
-  // 2. Signal the LCD task to start
-  // We use the handle 'lcdTaskHandle' created by the CMSIS-RTOS wrapper
-  xTaskNotifyGive(lcdTaskHandle);
+  snprintf(msg, sizeof(msg), 
+          "\r\n\r\n"
+          "-----------------------\r\n"
+          "--- DEVICE IDENTITY ---\r\n"
+          "--NODE ID: 0x%08lX--\r\n"
+          "-----------------------\r\n\r\n", 
+          (uint32_t)nodeInfo.nodeID);
+
+  SecureDebug(msg); // Print to UART2
+
+  FLAG_SEND_INTRODUCTION = true;
+
+  // 2. Signal the CAN transmitter task to start
+  // We use the handle 'canTxTaskHandle' created by the CMSIS-RTOS wrapper
+  xTaskNotifyGive(canTxTaskHandle);
 
   /* Infinite loop */
   for(;;)
   {
-    // 1. Get the current tick value (milliseconds since boot)
-    uint16_t tick = (HAL_GetTick() / 1000);
+    HAL_GPIO_TogglePin(LED_GREEN_GPIO_Port, LED_GREEN_Pin);
 
-    // 2. Format the string
-    // %lu is used for unsigned long (uint32_t)
-    snprintf(msg, sizeof(msg), "Uptime: %u sec\r\n", tick);
+    // Handle the 1-second logic (nodeCheckStatus)
+    // nodeCheckStatus();
 
-    // 3. Transmit over UART2
-    SecureDebug(msg); // Print to UART2
+    /* Keep the submodule data fresh, copying from the DMA buffer 
+    *  TODO: Needs to be based on a build flag that defines what type of module the code 
+    *  is running on. Not all modules will use the ADC */
+    extern uint16_t adc_buffer[2]; 
+    nodeInfo.subModules[0].data.i32Value = (uint32_t)adc_buffer[0]; // Example: VRef
+    nodeInfo.subModules[1].data.i32Value = (uint32_t)adc_buffer[1]; // Example: Temp
 
-    osDelay(1000);
+    if (FLAG_SEND_INTRODUCTION) {
+      /* We haven't received an INTRO_ACK for a while, re-send the current portion in case the master missed it */
+      txIntroduction();
+    }
+    // This replaces the millis() check. 1000ms = 1Hz.
+    osDelay(500);
   }
   /* USER CODE END StartDefaultTask */
 }
@@ -182,150 +251,120 @@ void StartDefaultTask(void const * argument)
 * @retval None
 */
 /* USER CODE END Header_StartLCDTask */
-void StartLCDTask(void const * argument)
-{
-  /* USER CODE BEGIN StartLCDTask */
-  static char msg[64] __attribute__((aligned(8)));
 
-  // What are the factory ADC Calibration Constants for STM32G0?
-  uint16_t *TS_CAL1 = (uint16_t *)(0x1FFF75A8); // Note: Address differs from F1/F3
-  uint16_t *TS_CAL2 = (uint16_t *)(0x1FFF75CA); 
 
-  // Wait indefinitely for a notification from the Default Task
-  // This puts the task into a 'Blocked' state (0% CPU usage)
-  ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
 
-  // 1. Start Calibration
-  HAL_ADCEx_Calibration_Start(&hadc1);
-  // osDelay(50);
 
-  /* Manually ensure internal paths are enabled */
-  ADC1_COMMON->CCR |= ADC_CCR_TSEN;   // Temperature Sensor Enable
-  ADC1_COMMON->CCR |= ADC_CCR_VREFEN; // Vrefint Enable
-
-  // 2. Start ADC in DMA Mode
-  // This tells the hardware: "Convert 2 channels and put them in adc_buffer"
-  HAL_ADC_Start_DMA(&hadc1, (uint32_t*)adc_buffer, 2);
-
-  // osDelay(1000); 
-  /* Infinite loop */
-  for(;;)
-  {
-    // 3. No Polling! The data is already in the buffer.
-    uint32_t rawAn1 = adc_buffer[0];
-    uint32_t rawTemp = adc_buffer[1];
-
-    /* --- Corrected Calculation --- */
-    // 1. Adjust rawTemp to a 3.0V reference (assuming your VCC is 3.3V)
-    // 918 * 3300 / 3000 = ~1010
-    int32_t rawTemp_30V = (int32_t)rawTemp * 3300 / 3000;
-
-    // 2. Calculate the difference from the 30C calibration point
-    int32_t delta_ADC = rawTemp_30V - (int32_t)(*TS_CAL1);
-
-    // 3. Scale and divide
-    // STM32G0 TS_CAL2 is at 130C. Range is (130 - 30) = 100. Multiply by 10 for decimal (1000).
-    int32_t temp_scaled = (delta_ADC * 1000) / (int32_t)(*TS_CAL2 - *TS_CAL1) + 300;
-
-    int t_int = temp_scaled / 10;
-    int t_dec = abs(temp_scaled % 10);
-
-    /* --- Printing --- */
-    snprintf(msg, sizeof(msg), "\r\nA1:%u T:%d.%dC\r\n", 
-              (unsigned int)rawAn1, t_int, t_dec);
-
-    SecureDebug(msg); // Print to UART2
-
-    osDelay(1000); // The DMA updates much faster than this loop
-  }
-  /* USER CODE END StartLCDTask */
-}
-
-/* USER CODE BEGIN Header_StartBlinkTask */
 /**
-* @brief Function implementing the blinkTask thread.
-* @param argument: Not used
-* @retval None
-*/
-/* USER CODE END Header_StartBlinkTask */
-void StartBlinkTask(void const * argument)
-{
-  /* USER CODE BEGIN StartBlinkTask */
-  /* Infinite loop */
-  for(;;)
-  {
-    HAL_GPIO_TogglePin(LED_GREEN_GPIO_Port, LED_GREEN_Pin);
-    vTaskDelay(pdMS_TO_TICKS(200));
-  }
-  /* USER CODE END StartBlinkTask */
-}
-
-
+ * @brief Function implementing the canRxTask thread.
+ * @details This function continuously waits for message pointers from the ISR
+ *          and checks if the message is intended for this node. It then
+ *          performs the respective actions based on the message type.
+ * @param argument: Not used
+ * @retval None
+ */
 void StartCanRxTask(void const * argument) {
+    osEvent event;
+    CAN_Msg_t *pRx;
+    char dbg[64]; // Local stack message buffer
+
     for(;;) {
-        // Wait for notification from the ISR
-        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        /* 1. Wait for a message pointer from the ISR */
+        event = osMessageGet(canRxQueueHandle, osWaitForever);
 
-        while (HAL_FDCAN_GetRxMessage(&hfdcan1, FDCAN_RX_FIFO0, &rxHeader, rxData) == HAL_OK) {
-            // 1. Extract Remote ID (Bytes 0-3 as per your CSV)
-            uint32_t msgRemoteId = (rxData[0]) | (rxData[1] << 8) | (rxData[2] << 16) | (rxData[3] << 24);
+        if (event.status == osEventMessage) {
+            pRx = (CAN_Msg_t*)event.value.p;
 
-            // 2. Check if this message is intended for this board
-            if (msgRemoteId == board_crc) {
-                // uint8_t switchId = rxData[4]; // Byte 4 is switch id in CSV
+            /* 2. Extract Remote ID using little-endian pointer cast */
+            uint32_t msgRemoteId = *(uint32_t*)&pRx->payload;
 
-                switch (rxHeader.Identifier) {
-                    case CAN_ID_SW_SET_ON:
-                        // Example: Toggle LED or Load based on switchId
-                        HAL_GPIO_WritePin(LED_GREEN_GPIO_Port, LED_GREEN_Pin, GPIO_PIN_SET);
-                        SecureDebug("CAN: Load ON\r\n");
+            /* 3. Logic: Is this intended for us? */
+            if (msgRemoteId == nodeInfo.nodeID) {
+                
+                switch (pRx->canID) {
+                    case REQ_NODE_INTRO_ID:
+                        FLAG_BEGIN_NORMAL_OPER = false; 
+                        FLAG_SEND_INTRODUCTION = true;
+                        SecureDebug("CAN RX: Master Requested Intro\r\n");
                         break;
 
-                    case CAN_ID_SW_SET_OFF:
-                        HAL_GPIO_WritePin(LED_GREEN_GPIO_Port, LED_GREEN_Pin, GPIO_PIN_RESET);
-                        SecureDebug("CAN: Load OFF\r\n");
-                        break;
+                    case ACK_INTRO_ID:
+                        /* Increment pointer ONLY on hardware ACK */
+                        introMsgPtr++; 
                         
-                    default:
+                        if (introMsgPtr > nodeInfo.subModCnt) {
+                            FLAG_SEND_INTRODUCTION = false;
+                            FLAG_BEGIN_NORMAL_OPER = true;
+                            SecureDebug("CAN RX: Intro Sequence Complete\r\n");
+                        } else {
+                            /* Trigger next intro packet immediately */
+                            txIntroduction();
+                        }
+                        break;
+
+                    case SW_SET_ON_ID:
+                        HAL_GPIO_WritePin(LED_GREEN_GPIO_Port, LED_GREEN_Pin, GPIO_PIN_SET);
+                        SecureDebug("CAN RX: Remote Load ON\r\n");
+                        break;
+
+                    case SW_SET_OFF_ID:
+                        HAL_GPIO_WritePin(LED_GREEN_GPIO_Port, LED_GREEN_Pin, GPIO_PIN_RESET);
+                        SecureDebug("CAN RX: Remote Load OFF\r\n");
                         break;
                 }
             }
+
+            /* 4. ALWAYS free the pointer back to the pool */
+            osPoolFree(canMsgPoolHandle, pRx);
         }
     }
 }
 
+/**
+ * @brief  CAN Transmitter Task
+ * @details  This task waits for pointers to CAN_Msg_t structures to be pushed into the canTxQueueHandle by other tasks.
+ *             It then transmits the data over the CAN bus using the HAL_FDCAN library.
+ *             The task is responsible for checking for hardware space and releasing memory back to the pool.
+ * @param  argument: Unused
+ * @retval None
+ */
 void StartCanTxTask(void const * argument) {
-    // We don't need the local txMsg buffer anymore because 
-    // we are getting a pointer from the queue event.
+    osEvent event;
+    CAN_Msg_t *pMsg;
     FDCAN_TxHeaderTypeDef txHeader;
 
+    /* Initialize static header fields */
+    txHeader.IdType = FDCAN_STANDARD_ID;
+    txHeader.TxFrameType = FDCAN_DATA_FRAME;
+    txHeader.DataLength = FDCAN_DLC_BYTES_8;
+    txHeader.ErrorStateIndicator = FDCAN_ESI_ACTIVE;
+    txHeader.BitRateSwitch = FDCAN_BRS_OFF;
+    txHeader.FDFormat = FDCAN_CLASSIC_CAN;
+    txHeader.TxEventFifoControl = FDCAN_NO_TX_EVENTS;
+
     for(;;) {
-        // 1. Capture the event in a variable so we can access its value
-        osEvent event = osMessageGet(canTxQueueHandle, osWaitForever);
+        /* 1. Wait for a pointer to arrive in the queue */
+        event = osMessageGet(canTxQueueHandle, osWaitForever);
 
         if (event.status == osEventMessage) {
-            // 2. Cast the value to our pointer type
-            // Note: This assumes you sent a pointer to the queue 
-            // OR the struct is small enough to fit in the value field.
-            CAN_Msg_t *ptrMsg = (CAN_Msg_t*)event.value.p;
+            /* 2. Retrieve the pointer to the CAN_Msg_t in the pool */
+            pMsg = (CAN_Msg_t*)event.value.p;
 
-            // 3. Assign Header values using the GLOBAL FDCAN constants
-            txHeader.Identifier = ptrMsg->Identifier;
-            txHeader.IdType = FDCAN_STANDARD_ID;      // Hardware constant
-            txHeader.TxFrameType = FDCAN_DATA_FRAME;   // Hardware constant
-            
-            // Set DLC. Since ptrMsg has a DLC field, you can use it, 
-            // but FDCAN uses specific macros for the field.
-            txHeader.DataLength = FDCAN_DLC_BYTES_8; 
-            
-            txHeader.ErrorStateIndicator = FDCAN_ESI_ACTIVE;
-            txHeader.BitRateSwitch = FDCAN_BRS_OFF;
-            txHeader.FDFormat = FDCAN_CLASSIC_CAN;
-            txHeader.TxEventFifoControl = FDCAN_NO_TX_EVENTS;
-            txHeader.MessageMarker = 0;
+            if (pMsg != NULL) {
+                txHeader.Identifier = pMsg->canID;
 
-            // 4. Send the message using the data from the pointer
-            HAL_FDCAN_AddMessageToTxFifoQ(&hfdcan1, &txHeader, ptrMsg->Data);
+                /* 3. Check for hardware space and transmit */
+                if (HAL_FDCAN_GetTxFifoFreeLevel(&hfdcan1) > 0) {
+                  if (HAL_FDCAN_AddMessageToTxFifoQ(&hfdcan1, &txHeader, (uint8_t*)&pMsg->payload) != HAL_OK) {
+                      SecureDebug("CAN HW Error\r\n");
+                  }
+                } else {
+                    SecureDebug("CAN Mailbox Full\r\n");
+                }
+
+                /* 4. IMPORTANT: Free the memory back to the pool so it can be reused */
+                osPoolFree(canMsgPoolHandle, pMsg);
+            }
         }
     }
 }
