@@ -31,6 +31,17 @@ extern "C" {
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "cmsis_os.h"
+#include "task.h"
+#include "crc.h"
+#include "adc.h"
+#include "fdcan.h"
+#include "dma.h"
+#include "gpio.h"
+#include "rtc.h"
+#include "securedebug.h"
+#include "usart.h"
+#include "node_id.h"
 
 /* USER CODE END Includes */
 
