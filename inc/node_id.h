@@ -19,9 +19,9 @@ extern "C" {
 #endif
 
 #include <stdint.h>
+#include "stm32g0xx_hal.h"
+#include "crc.h"        
 #include "canbus_project.h" /* my various CAN functions and structs */
-#include "typedef.h"
-
 
 /**
  * @brief Compute CRC32 over the STM32 Unique Device ID and return it as 4 bytes.
