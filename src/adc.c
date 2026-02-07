@@ -87,6 +87,18 @@ void MX_ADC1_Init(void)
   }
   /* USER CODE BEGIN ADC1_Init 2 */
 
+  // 1. Start Calibration
+  HAL_ADCEx_Calibration_Start(&hadc1);
+  // osDelay(50);
+
+  /* Manually ensure internal paths are enabled */
+  ADC1_COMMON->CCR |= ADC_CCR_TSEN;   /**< Temperature Sensor Enable */
+  ADC1_COMMON->CCR |= ADC_CCR_VREFEN; /**< Vrefint Enable */
+
+  // 2. Start ADC in DMA Mode
+  extern uint16_t adc_buffer[2]; /**< grab the buffer from main.c */
+  /** This tells the hardware: "Convert 2 channels and put them in adc_buffer" */
+  HAL_ADC_Start_DMA(&hadc1, (uint32_t*)adc_buffer, 2);
   /* USER CODE END ADC1_Init 2 */
 
 }
