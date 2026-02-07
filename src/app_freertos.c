@@ -266,7 +266,7 @@ void StartDefaultTask(void const * argument)
 void StartCanRxTask(void const * argument) {
     osEvent event;
     CAN_Msg_t *pRx;
-    char dbg[64]; // Local stack message buffer
+    // char dbg[64]; /* Local stack message buffer */
 
     for(;;) {
         /* 1. Wait for a message pointer from the ISR */
@@ -340,8 +340,8 @@ void StartCanTxTask(void const * argument) {
     txHeader.ErrorStateIndicator = FDCAN_ESI_ACTIVE;
     txHeader.BitRateSwitch = FDCAN_BRS_OFF;
     txHeader.FDFormat = FDCAN_CLASSIC_CAN;
-    txHeader.TxEventFifoControl = FDCAN_NO_TX_EVENTS;
-
+    // txHeader.TxEventFifoControl = FDCAN_RECORD_TX_EVENTS;
+    txHeader.MessageMarker = 0xAA; /* Unique ID to recognize this specific send */
     for(;;) {
         /* 1. Wait for a pointer to arrive in the queue */
         event = osMessageGet(canTxQueueHandle, osWaitForever);
@@ -359,11 +359,48 @@ void StartCanTxTask(void const * argument) {
                       SecureDebug("CAN HW Error\r\n");
                   }
                 } else {
-                    SecureDebug("CAN Mailbox Full\r\n");
+                  int retry = 0;
+                  while (HAL_FDCAN_GetTxFifoFreeLevel(&hfdcan1) == 0 && retry < 3) {
+                      osDelay(5); /* Give the hardware 5ms to clear a mailbox */
+                      retry++; 
+                  }
+                  if (retry >= 3) SecureDebug("CAN Mailbox Full\r\n");
                 }
 
                 /* 4. IMPORTANT: Free the memory back to the pool so it can be reused */
                 osPoolFree(canMsgPoolHandle, pMsg);
+            }
+
+                        /* Define a structure to hold the protocol status */
+            FDCAN_ProtocolStatusTypeDef protocolStatus;
+            
+            /* Get the current status from the hardware */
+            HAL_FDCAN_GetProtocolStatus(&hfdcan1, &protocolStatus);
+
+            /* 0=No Error, 1=Stuff, 2=Form, 3=Ack, 4=Bit1, 5=Bit0, 6=CRC */
+            uint8_t lec = protocolStatus.LastErrorCode; 
+            if (lec == 3) {
+                SecureDebug("CAN: No ACK detected - check wiring!\r\n");
+            }
+
+            /* Check specifically for Bus-Off */
+            if (protocolStatus.BusOff) {
+                SecureDebug("CAN: Bus-Off detected! Attempting recovery...\r\n");
+                
+                /* 1. Stop the peripheral */
+                HAL_FDCAN_Stop(&hfdcan1);
+                
+                /* 2. Wait a bit for the bus to stabilize */
+                osDelay(100); 
+                
+                /* 3. Restart the peripheral */
+                if (HAL_FDCAN_Start(&hfdcan1) == HAL_OK) {
+                    /* 4. Re-enable notifications */
+                    HAL_FDCAN_ActivateNotification(&hfdcan1, FDCAN_IT_RX_FIFO0_NEW_MESSAGE, 0);
+                    SecureDebug("CAN: Recovery successful.\r\n");
+                } else {
+                    SecureDebug("CAN: Recovery failed.\r\n");
+                }
             }
         }
     }
