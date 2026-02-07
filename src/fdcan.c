@@ -88,6 +88,11 @@ void MX_FDCAN1_Init(void)
       Error_Handler();
   }
 
+  /* Enable the Global Tx Completed notification */
+  if (HAL_FDCAN_ActivateNotification(&hfdcan1, FDCAN_IT_TX_COMPLETE, 0xFFFFFFFF) != HAL_OK) {
+    Error_Handler();
+  }
+
   // Activate the notification for new rx messages in FIFO 0
   if (HAL_FDCAN_ActivateNotification(&hfdcan1, FDCAN_IT_RX_FIFO0_NEW_MESSAGE, 0) != HAL_OK) {
       Error_Handler();
