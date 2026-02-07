@@ -20,7 +20,13 @@
 
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
+#include <stdio.h>   // For sprintf and snprintf
+#include <stdlib.h>  // For abs
+#include <string.h>  // For memset (if you use it)
+
 #include "main.h"
+
+/* STM32 peripherals*/
 #include "adc.h"
 #include "dma.h"
 #include "crc.h"
@@ -29,24 +35,18 @@
 #include "fdcan.h"
 #include "rtc.h"
 #include "node_id.h"
-#include "securedebug.h"
 #include "cmsis_os.h"
 
-/* Private includes ----------------------------------------------------------*/
-/* USER CODE BEGIN Includes */
-#include <stdio.h>   // For sprintf and snprintf
-#include <stdlib.h>  // For abs
-#include <string.h>  // For memset (if you use it)
+#include "securedebug.h"
 #include "canbus_project.h" /* my various CAN functions and structs */
-#include "typedef.h"
 
 
 // Calculated in DefaultTask, we'll bring it in here as well
-extern uint32_t board_crc;
+uint32_t board_crc; /**< Declared in main.c, unique CRC32 based on board UID */
 
 extern osThreadId defaultTaskHandle;
-extern osThreadId lcdTaskHandle;
-extern osThreadId blinkTaskHandle;
+// extern osThreadId lcdTaskHandle;
+// extern osThreadId blinkTaskHandle;
 
 extern osThreadId canTxTaskHandle;
 extern osThreadId canRxTaskHandle;
@@ -78,25 +78,13 @@ void MX_FREERTOS_Init(void);
 int main(void)
 {
 
-  /* USER CODE BEGIN 1 */
-
-  /* USER CODE END 1 */
-
   /* MCU Configuration--------------------------------------------------------*/
 
   /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
   HAL_Init();
 
-  /* USER CODE BEGIN Init */
-
-  /* USER CODE END Init */
-
   /* Configure the system clock */
   SystemClock_Config();
-
-  /* USER CODE BEGIN SysInit */
-
-  /* USER CODE END SysInit */
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
@@ -107,11 +95,11 @@ int main(void)
   MX_USART1_UART_Init();
   MX_CRC_Init();
   MX_RTC_Init();
-  /* USER CODE BEGIN 2 */
 
-  /* USER CODE END 2 */
+  /* Setup board CRC */
+  board_crc = NodeID_GetU32(); /**< Get the 32-bit CRC over the STM32 Unique Device ID */
 
-  /* Call init function for freertos objects (in cmsis_os2.c) */
+    /* Call init function for freertos objects (in cmsis_os2.c) */
   MX_FREERTOS_Init();
 
   /* Start scheduler */
@@ -181,17 +169,7 @@ void SystemClock_Config(void)
 
 
 
-// This callback runs in IRQ context when a CAN message arrives
-void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs) {
-    if ((RxFifo0ITs & FDCAN_IT_RX_FIFO0_NEW_MESSAGE) != 0) {
-        // Wake up the RX Task, ensure handle is valid
-        if (canRxTaskHandle != NULL) {
-            BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-            vTaskNotifyGiveFromISR(canRxTaskHandle, &xHigherPriorityTaskWoken);
-            portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
-        }
-    }
-}
+
 
 /**
   * @brief  Period elapsed callback in non blocking mode
