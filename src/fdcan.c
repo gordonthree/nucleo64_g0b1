@@ -20,9 +20,18 @@
 /* Includes ------------------------------------------------------------------*/
 #include "fdcan.h"
 
-/* USER CODE BEGIN 0 */
 FDCAN_RxHeaderTypeDef rxHeader;
-/* USER CODE END 0 */
+
+/* Bring in handles for RTOS tasks and queues*/
+extern osThreadId canTxTaskHandle;
+extern osThreadId canRxTaskHandle;
+
+extern osMessageQId canTxQueueHandle;
+extern osMessageQId canRxQueueHandle;
+
+/* Bring in handle for RTOS message pool*/
+extern osPoolId canMsgPoolHandle;
+
 
 FDCAN_HandleTypeDef hfdcan1;
 
@@ -78,7 +87,7 @@ void MX_FDCAN1_Init(void)
       Error_Handler();
   }
 
-  // Activate the notification for new messages in FIFO 0
+  // Activate the notification for new rx messages in FIFO 0
   if (HAL_FDCAN_ActivateNotification(&hfdcan1, FDCAN_IT_RX_FIFO0_NEW_MESSAGE, 0) != HAL_OK) {
       Error_Handler();
   }
@@ -161,4 +170,41 @@ void HAL_FDCAN_MspDeInit(FDCAN_HandleTypeDef* fdcanHandle)
 
 /* USER CODE BEGIN 1 */
 
+// This callback runs in IRQ context when a CAN message arrives
+/**
+  * @brief  Rx FIFO 0 callback.
+  * @param  hfdcan: pointer to an FDCAN_HandleTypeDef structure
+  * @param  RxFifo0ITs: indicates which ADRITs are set.
+  * @retval None
+  */
+void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs)
+{
+  if ((RxFifo0ITs & FDCAN_IT_RX_FIFO0_NEW_MESSAGE) != 0)
+  {
+    FDCAN_RxHeaderTypeDef rxHeader;
+    uint8_t rxData[8];
+
+    /* 1. Retrieve message from hardware FIFO */
+    if (HAL_FDCAN_GetRxMessage(hfdcan, FDCAN_RX_FIFO0, &rxHeader, rxData) == HAL_OK)
+    {
+      /* 2. Allocate a block from our Memory Pool */
+      /* Use 0 for timeout as we are in an ISR */
+      CAN_Msg_t *pNew = (CAN_Msg_t*)osPoolAlloc(canMsgPoolHandle);
+
+      if (pNew != NULL) {
+        pNew->canID = rxHeader.Identifier;
+        pNew->DLC = 8; // Classic CAN
+        
+        // Fast copy of the 8-byte payload
+        *(uint64_t*)&pNew->payload = *(uint64_t*)&rxData[0];
+
+        /* 3. Post the pointer to the RX Queue */
+        if (osMessagePut(canRxQueueHandle, (uint32_t)pNew, 0) != osOK) {
+          // If queue is full, we must free the block to avoid memory leak
+          osPoolFree(canMsgPoolHandle, pNew);
+        }
+      }
+    }
+  }
+}
 /* USER CODE END 1 */
