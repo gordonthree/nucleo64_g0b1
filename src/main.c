@@ -26,18 +26,8 @@
 
 #include "main.h"
 
-/* STM32 peripherals*/
-#include "adc.h"
-#include "dma.h"
-#include "crc.h"
-#include "usart.h"
-#include "gpio.h"
-#include "fdcan.h"
-#include "rtc.h"
-#include "node_id.h"
-#include "cmsis_os.h"
 
-#include "securedebug.h"
+
 #include "canbus_project.h" /* my various CAN functions and structs */
 
 

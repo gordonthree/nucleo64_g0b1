@@ -39,7 +39,6 @@ extern "C" {
 #include "dma.h"
 #include "gpio.h"
 #include "rtc.h"
-#include "securedebug.h"
 #include "usart.h"
 #include "node_id.h"
 

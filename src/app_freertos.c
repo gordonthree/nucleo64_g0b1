@@ -34,23 +34,37 @@ osThreadId defaultTaskHandle;
 osThreadId canTxTaskHandle;
 osThreadId canRxTaskHandle;
 
-/* Define the message pool: 16 blocks of type CAN_Msg_t */
+osThreadId debugTaskHandle;
+void StartDebugTask(void const * argument);
+
+/* Pole for CAN messages 16 blocks of type CAN_Msg_t */
 osPoolId canMsgPoolHandle;
-osPoolDef(canMsgPool, 16, CAN_Msg_t); 
+osPoolDef(canMsgPool, CAN_TX_QUEUE_LEN, CAN_Msg_t); 
+
+/* Pool for the debug message strings */
+osPoolId debugPoolHandle;
+osPoolDef(debugPool, DEBUG_QUEUE_LEN, DEBUG_MSG_SIZE); 
 
 /* Define the TX pointer queue: 16 slots, each holding a POINTER (uint32_t) */
 osMessageQId canTxQueueHandle;
-osMessageQDef(canTxQueue, 16, uint32_t);
+osMessageQDef(canTxQueue, CAN_TX_QUEUE_LEN, uint32_t);
 
 /* Define the RX pointer queue: 16 slots, each holding a POINTER (uint32_t) */
 osMessageQId canRxQueueHandle;
-osMessageQDef(canRxQueue, 16, uint32_t);
+osMessageQDef(canRxQueue, CAN_RX_QUEUE_LEN, uint32_t);
+
+/* Define a queue for debug message pointers */
+osMessageQId debugQueueHandle;
+osMessageQDef(debugQueue, DEBUG_QUEUE_LEN, uint32_t); /* Queue of 16 string pointers */
+
 
 /* Global function prototypes -----------------------------------------------*/
 
 void StartDefaultTask(void const * argument);
 void StartCanRxTask(void const * argument);
 void StartCanTxTask(void const * argument);
+
+void SecureDebug(const char* buffer);
 
 void MX_FREERTOS_Init(void); /* (MISRA C 2004 rule 8.1) */
 
@@ -60,8 +74,8 @@ static void txIntroduction(void); /**< Function to send data about this node to 
 static void txSensorData(void); /**< Function to send sensor data to the can bus */
 static float internalTempFloat(uint32_t adc_val);
 
-/* Dispatch table configuration */
 typedef void (*CAN_Handler_t)(CAN_Msg_t *pMsg);
+
 
 /**
   * @brief  FreeRTOS initialization
@@ -78,8 +92,11 @@ void MX_FREERTOS_Init(void) {
   /* BEGIN RTOS_MUTEX */
   uartMutexHandle = osMutexCreate(osMutex(uartMutex));
 
-  /* Create the Memory Pool */
+  /* Create Memory Pool for CAN messages */
   canMsgPoolHandle = osPoolCreate(osPool(canMsgPool));
+
+  /* Create Memory Pool for debug messages */
+  debugPoolHandle = osPoolCreate(osPool(debugPool));
 
   /* Create the Message Queue */
   canTxQueueHandle = osMessageCreate(osMessageQ(canTxQueue), NULL);
@@ -97,6 +114,69 @@ void MX_FREERTOS_Init(void) {
   /* definition and creation of canTxTask */
   osThreadDef(canTxTask, StartCanTxTask, osPriorityNormal, 0, 256);
   canTxTaskHandle = osThreadCreate(osThread(canTxTask), NULL);
+
+  /* definition and creation of debugTask */
+  osThreadDef(debugTask, StartDebugTask, osPriorityLow, 0, 256);
+  debugTaskHandle = osThreadCreate(osThread(debugTask), NULL);
+}
+
+void SecureDebug(const char* str) {
+    /* 1. Allocate a buffer from the pool */
+    char* pMsg = (char*)osPoolAlloc(debugPoolHandle);
+    int msgSize = (DEBUG_MSG_SIZE - 1); /* subtract one for null termination */
+
+    if (pMsg != NULL) {
+        /* 2. Copy the string (safely) */
+        strncpy(pMsg, str, DEBUG_MSG_SIZE);
+        pMsg[msgSize] = '\0'; /* Ensure null termination */
+        
+        /* 3. Send the pointer to the queue. 
+           If the queue is full, we free it immediately so we don't leak memory. */
+        if (osMessagePut(debugQueueHandle, (uint32_t)pMsg, 0) != osOK) {
+            osPoolFree(debugPoolHandle, pMsg);
+        }
+    }
+}
+
+void Handle_DataEpoch(CAN_Msg_t *pMsg) {
+    uint32_t rxTimeRev;
+    
+    /* Cast the address of the payload to a byte pointer to satisfy memcpy */
+    // memcpy(&rxTimeRev, (uint8_t*)&pMsg->payload, 4);
+    memcpy(&rxTimeRev, ((uint8_t*)&pMsg->payload) + 4, 4);    
+    uint32_t unixTimestamp = __REV(rxTimeRev);
+
+    /* Logic to set RTC goes here */
+    /* Convert to human readable string */
+    time_t rawtime = (time_t)unixTimestamp;
+    struct tm *timeinfo;
+    timeinfo = localtime(&rawtime);
+
+    char dbg[128];
+    snprintf(dbg, sizeof(dbg), "RTC Sync: %04d-%02d-%02d %02d:%02d:%02d\r\n", 
+             timeinfo->tm_year + 1900, timeinfo->tm_mon + 1, timeinfo->tm_mday,
+             timeinfo->tm_hour, timeinfo->tm_min, timeinfo->tm_sec);
+    
+    SecureDebug(dbg);
+}
+
+
+void Handle_ReqNodeIntro(CAN_Msg_t *pMsg) {
+    FLAG_BEGIN_NORMAL_OPER = false;
+    FLAG_SEND_INTRODUCTION = true;
+    introMsgPtr = 0;
+    SecureDebug("CAN RX: Master Requested Intro\r\n");
+}
+
+void Handle_AckIntro(CAN_Msg_t *pMsg) {
+    if (FLAG_SEND_INTRODUCTION) {
+        introMsgPtr++;
+        if (introMsgPtr > nodeInfo.subModCnt) {
+            FLAG_SEND_INTRODUCTION = false;
+            FLAG_BEGIN_NORMAL_OPER = true;
+            SecureDebug("CAN RX: Intro Sequence Complete\r\n");
+        }
+    }
 }
 
 
@@ -360,6 +440,22 @@ void StartDefaultTask(void const * argument)
 }
 
 
+/* Dispatch table configuration */
+typedef struct {
+    uint16_t msgID;
+    CAN_Handler_t handler;
+} CAN_Dispatch_t;
+
+/* The actual table - make it 'const' to save RAM and put it in Flash */
+const CAN_Dispatch_t can_dispatch_table[] = {
+    { REQ_NODE_INTRO_ID, Handle_ReqNodeIntro },  /* 0x401 */
+    { ACK_INTRO_ID,      Handle_AckIntro      }, /* 0x400 */
+    { DATA_EPOCH_ID,     Handle_DataEpoch     }, /* 0x40C */
+};
+
+#define DISPATCH_COUNT (sizeof(can_dispatch_table) / sizeof(CAN_Dispatch_t))
+
+
 /**
  * @brief Function implementing the canRxTask thread.
  * @details This function continuously waits for message pointers from the ISR
@@ -369,9 +465,10 @@ void StartDefaultTask(void const * argument)
  * @retval None
  */
 void StartCanRxTask(void const * argument) {
-    osEvent event;
     CAN_Msg_t *pRx;
-    // char dbg[64]; /* Local stack message buffer */
+    
+    /* Buffer to hold message strings */
+    static char msg[512] __attribute__((aligned(8))); 
     
     /* 1. Wait for the signal from StartDefaultTask */
     ulTaskNotifyTake(pdTRUE, portMAX_DELAY); 
@@ -389,55 +486,50 @@ void StartCanRxTask(void const * argument) {
     }
 
     for(;;) {
-        /* 1. Wait for a message pointer from the ISR */
-        event = osMessageGet(canRxQueueHandle, osWaitForever);
+        /* Fetch the message from the queue */
+        osEvent event = osMessageGet(canRxQueueHandle, osWaitForever);
 
+        /* Take action when a message is received */
         if (event.status == osEventMessage) {
+            /* Copy message data to a local variable */
             pRx = (CAN_Msg_t*)event.value.p;
 
-            /* 2. Extract Remote ID using little-endian pointer cast */
-            // uint32_t msgRemoteId = *(uint32_t*)&pRx->payload;
-            uint32_t msgRemoteId = __REV(*(uint32_t*)&pRx->payload); /* Reverse endianness */
+            /* Extract the remote ID */
+            uint32_t msgRemoteId = __REV(*(uint32_t*)&pRx->payload);
 
-            /* 3. Logic: Is this intended for us? */
+            /* Check if the message is for our Node ID */
             if (msgRemoteId == nodeInfo.nodeID) {
+                bool found = false;
                 
-                switch (pRx->canID) {
-                    case REQ_NODE_INTRO_ID:
-                        FLAG_BEGIN_NORMAL_OPER = false; 
-                        FLAG_SEND_INTRODUCTION = true;
-                        SecureDebug("CAN RX: Master Requested Intro\r\n");
+                /* Search the table for a matching ID */
+                for (int i = 0; i < DISPATCH_COUNT; i++) {
+                    if (pRx->canID == can_dispatch_table[i].msgID) {
+                        /* Execute the function pointed to in the table */
+                        can_dispatch_table[i].handler(pRx);
+                        found = true;
                         break;
+                    }
+                }
 
-                    case ACK_INTRO_ID:
-                        /* Only increment if we are actually in the intro phase */
-                        if (FLAG_SEND_INTRODUCTION) {
-                            introMsgPtr++; 
-                            
-                            if (introMsgPtr > nodeInfo.subModCnt) {
-                                FLAG_SEND_INTRODUCTION = false;
-                                FLAG_BEGIN_NORMAL_OPER = true;
-                                SecureDebug("CAN RX: Intro Sequence Complete\r\n");
-                            }
-                        }
-                        break;
-
-                    case SW_SET_ON_ID:
-                        HAL_GPIO_WritePin(LED_GREEN_GPIO_Port, LED_GREEN_Pin, GPIO_PIN_SET);
-                        SecureDebug("CAN RX: Remote Load ON\r\n");
-                        break;
-
-                    case SW_SET_OFF_ID:
-                        HAL_GPIO_WritePin(LED_GREEN_GPIO_Port, LED_GREEN_Pin, GPIO_PIN_RESET);
-                        SecureDebug("CAN RX: Remote Load OFF\r\n");
-                        break;
+                if (!found) {
+                    snprintf(msg, sizeof(msg), "CAN RX: Unhandled ID: 0x%08lx\r\n", pRx->canID);
+                    SecureDebug(msg);
+                    /* Optional: Log unhandled IDs */
                 }
             }
-
-            /* 4. ALWAYS free the pointer back to the pool */
             osPoolFree(canMsgPoolHandle, pRx);
         }
+
     }
+        // case SW_SET_ON_ID:
+        //     HAL_GPIO_WritePin(LED_GREEN_GPIO_Port, LED_GREEN_Pin, GPIO_PIN_SET);
+        //     SecureDebug("CAN RX: Remote Load ON\r\n");
+        //     break;
+
+        // case SW_SET_OFF_ID:
+        //     HAL_GPIO_WritePin(LED_GREEN_GPIO_Port, LED_GREEN_Pin, GPIO_PIN_RESET);
+        //     SecureDebug("CAN RX: Remote Load OFF\r\n");
+        //     break;
 }
 
 /**
@@ -524,6 +616,29 @@ void StartCanTxTask(void const * argument) {
                     SecureDebug("CAN: Recovery failed.\r\n");
                 }
             }
+        }
+    }
+}
+
+void StartDebugTask(void const * argument) {
+    osEvent event;
+    for(;;) {
+        /* Wait forever for a pointer to arrive in the queue */
+        event = osMessageGet(debugQueueHandle, osWaitForever);
+        
+        if (event.status == osEventMessage) {
+            char* pStr = (char*)event.value.p;
+            
+            /* Grab the mutex before touching the UART hardware */
+            osMutexWait(uartMutexHandle, osWaitForever);
+            
+            /* Send to UART */
+            HAL_UART_Transmit(&huart2, (uint8_t*)pStr, strlen(pStr), 100);
+            
+            osMutexRelease(uartMutexHandle);
+            
+            /* IMPORTANT: Free the memory back to the pool! */
+            osPoolFree(debugPoolHandle, pStr);
         }
     }
 }
