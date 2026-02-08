@@ -22,9 +22,16 @@
 
 /* USER CODE BEGIN 0 */
 
+RTC_HandleTypeDef hrtc;
+RTC_TimeTypeDef sTime;
+RTC_DateTypeDef sDate;
+
+uint32_t RTC_Get_Timestamp(RTC_HandleTypeDef *hrtc);
+HAL_StatusTypeDef RTC_Set_Timestamp(RTC_HandleTypeDef *hrtc, uint32_t timestamp);
+
+
 /* USER CODE END 0 */
 
-RTC_HandleTypeDef hrtc;
 
 /* RTC init function */
 void MX_RTC_Init(void)
@@ -134,5 +141,82 @@ void HAL_RTC_MspDeInit(RTC_HandleTypeDef* rtcHandle)
 }
 
 /* USER CODE BEGIN 1 */
+#include <time.h>
+
+/* *
+ * Converts current RTC time/date into a 32-bit Unix timestamp.
+ * Useful for your CAN node data payloads.
+ */
+uint32_t RTC_Get_Timestamp(RTC_HandleTypeDef *hrtc) {
+    static RTC_TimeTypeDef sTime;
+    static RTC_DateTypeDef sDate;
+    struct tm time_struct;
+
+    HAL_RTC_GetTime(hrtc, &sTime, RTC_FORMAT_BIN);
+    HAL_RTC_GetDate(hrtc, &sDate, RTC_FORMAT_BIN);
+
+    time_struct.tm_year = sDate.Year + 100; // RTC Year is 0-99 (2000-2099)
+    time_struct.tm_mon  = sDate.Month - 1;
+    time_struct.tm_mday = sDate.Date;
+    time_struct.tm_hour = sTime.Hours;
+    time_struct.tm_min  = sTime.Minutes;
+    time_struct.tm_sec  = sTime.Seconds;
+
+    return (uint32_t)mktime(&time_struct);
+}
+
+
+/**
+ * @brief Thread-safe version of RTC sync using gmtime_r.
+ * @param hrtc: Pointer to the RTC handle
+ * @param timestamp: Unix timestamp (seconds since Jan 1, 1970)
+ * @return HAL_StatusTypeDef: HAL_OK if successful
+ */
+HAL_StatusTypeDef RTC_Set_Timestamp(RTC_HandleTypeDef *hrtc, uint32_t timestamp) {
+    /* * By declaring 'result' on the stack, we ensure that even if multiple
+     * FreeRTOS tasks call this function, each has its own private copy.
+     */
+    struct tm result;
+    RTC_TimeTypeDef sTime = {0};
+    RTC_DateTypeDef sDate = {0};
+    time_t raw_time = (time_t)timestamp;
+
+    /* * gmtime_r takes the source and a pointer to our local 'result' struct.
+     * It returns NULL if the conversion fails.
+     */
+    if (gmtime_r(&raw_time, &result) == NULL) {
+        return HAL_ERROR;
+    }
+
+    /* Safety check: STM32 RTC usually handles 2000-2099 */
+    if (result.tm_year < 100 || result.tm_year > 199) {
+        /* Optional: Handle out-of-range dates (pre-2000 or post-2099) */
+        return HAL_ERROR;
+    }
+
+    /* Map components to RTC Time Structure */
+    sTime.Hours   = (uint8_t)result.tm_hour;
+    sTime.Minutes = (uint8_t)result.tm_min;
+    sTime.Seconds = (uint8_t)result.tm_sec;
+    sTime.DayLightSaving = RTC_DAYLIGHTSAVING_NONE;
+    sTime.StoreOperation = RTC_STOREOPERATION_RESET;
+
+    /* Map components to RTC Date Structure */
+    sDate.Year    = (uint8_t)(result.tm_year - 100); /* 2026 becomes 26 */
+    sDate.Month   = (uint8_t)(result.tm_mon + 1);    /* 0-11 -> 1-12 */
+    sDate.Date    = (uint8_t)result.tm_mday;
+    sDate.WeekDay = (uint8_t)(result.tm_wday == 0 ? 7 : result.tm_wday);
+
+    /* Update Hardware (Time then Date for Shadow Register sync) */
+    if (HAL_RTC_SetTime(hrtc, &sTime, RTC_FORMAT_BIN) != HAL_OK) {
+        return HAL_ERROR;
+    }
+
+    if (HAL_RTC_SetDate(hrtc, &sDate, RTC_FORMAT_BIN) != HAL_OK) {
+        return HAL_ERROR;
+    }
+
+    return HAL_OK;
+}
 
 /* USER CODE END 1 */
