@@ -391,6 +391,10 @@ void StartDefaultTask(void const * argument)
     nodeInfo.subModules[1].dataMsgId = DATA_NODE_CPU_TEMP_ID;
     nodeInfo.subModules[1].sendFeatureMask = false;
 
+    /* Use the last few bits of your unique ID to create a 'random' startup delay */
+    uint32_t jitter = (nodeInfo.nodeID & 0x1FF); 
+    osDelay((2000 + jitter));
+
     snprintf(msg, sizeof(msg), 
           "\r\n\r\n"
           "-----------------------\r\n"
@@ -399,12 +403,9 @@ void StartDefaultTask(void const * argument)
           "-----------------------\r\n\r\n", 
           (uint32_t)nodeInfo.nodeID);
           
-    SecureDebug(msg); // Print to UART2
-
-    /* Use the last few bits of your unique ID to create a 0-500ms startup delay */
-    uint32_t jitter = (nodeInfo.nodeID & 0x1FF); 
-    osDelay(jitter);
-  
+    /* Print to UART2 */
+    SecureDebug(msg); 
+    
     /* Set flag to send the introduction*/
     FLAG_SEND_INTRODUCTION = true; 
 
@@ -582,6 +583,7 @@ void StartCanTxTask(void const * argument) {
                 /* Check the hardware level */
                 uint32_t freeLevel = HAL_FDCAN_GetTxFifoFreeLevel(&hfdcan1);
                 
+                /* Attempt transmission */
                 if (freeLevel > 0) {
                     txHeader.Identifier = pMsg->canID;
                     if (HAL_FDCAN_AddMessageToTxFifoQ(&hfdcan1, &txHeader, (uint8_t*)&pMsg->payload) != HAL_OK) {
@@ -592,16 +594,6 @@ void StartCanTxTask(void const * argument) {
                     SecureDebug("CAN TX HW Full! Check wiring/bitrate.\r\n");
                 }
                 
-                /* Attempt transmission */
-                if (HAL_FDCAN_GetTxFifoFreeLevel(&hfdcan1) > 0) {
-                    if (HAL_FDCAN_AddMessageToTxFifoQ(&hfdcan1, &txHeader, (uint8_t*)&pMsg->payload) != HAL_OK) {
-                        SecureDebug("CAN HW Error\r\n");
-                    }
-                } else {
-                    /* If no space, drop the message or handle retry briefly */
-                    SecureDebug("CAN Mailbox Full - Dropping Msg\r\n");
-                }
-
                 /* ALWAYS free the pointer pulled from the queue */
                 osPoolFree(canMsgPoolHandle, pMsg);
             }
