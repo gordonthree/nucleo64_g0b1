@@ -98,9 +98,11 @@ void MX_FREERTOS_Init(void) {
   /* Create Memory Pool for debug messages */
   debugPoolHandle = osPoolCreate(osPool(debugPool));
 
-  /* Create the Message Queue */
+  /* Initialize the Message Queues */
   canTxQueueHandle = osMessageCreate(osMessageQ(canTxQueue), NULL);
   canRxQueueHandle = osMessageCreate(osMessageQ(canRxQueue), NULL);
+  debugQueueHandle = osMessageCreate(osMessageQ(debugQueue), NULL);
+
   /* END RTOS_MUTEX */
 
   /* Create the thread(s) */
@@ -120,7 +122,19 @@ void MX_FREERTOS_Init(void) {
   debugTaskHandle = osThreadCreate(osThread(debugTask), NULL);
 }
 
+/**
+ * @brief  Securely send a string to the debug UART.
+ * @param   str  string to send (null terminated)
+ * @details This function allocates memory from the debug pool, copies the string to the allocated buffer, and then sends the pointer to the debug queue.
+ *          If the queue or pool aren't ready yet, don't crash. If the queue is full, we free it immediately so we don't leak memory.
+ */
 void SecureDebug(const char* str) {
+    /* Safety Check: If the queue or pool aren't ready yet, don't crash */
+    if (debugQueueHandle == NULL || debugPoolHandle == NULL) {
+        /* Optional: Fallback to a blocking HAL_UART_Transmit if you really need the early logs */
+        return; 
+    }
+    
     /* 1. Allocate a buffer from the pool */
     char* pMsg = (char*)osPoolAlloc(debugPoolHandle);
     int msgSize = (DEBUG_MSG_SIZE - 1); /* subtract one for null termination */
@@ -356,26 +370,26 @@ static void txIntroduction(void) {
 void StartDefaultTask(void const * argument)
 {
     /* USER CODE BEGIN StartDefaultTask */
-    static char msg[512] __attribute__((aligned(8))); /* Buffer to hold message strings */
+    static char msg[DEBUG_MSG_SIZE] __attribute__((aligned(8))); /* Buffer to hold message strings */
     uint32_t tickCounter = 0;
     introMsgPtr = 0; /* Reset the pointer */
   
-    /* Initialize nodeInfo */
+    /* Start the CAN tasks */
+    if (canRxTaskHandle != NULL) xTaskNotifyGive(canRxTaskHandle);
+    if (canTxTaskHandle != NULL) xTaskNotifyGive(canTxTaskHandle);
+
+    /* Initialize nodeInfo with some static values */
     nodeInfo.nodeID = board_crc; 
     nodeInfo.nodeTypeMsg = BOX_MULTI_IO_ID;
     nodeInfo.subModCnt = 2;
 
     nodeInfo.subModules[0].modType = INPUT_ANALOG_KNOB_ID;
     nodeInfo.subModules[0].dataMsgId = DATA_ANALOG_KNOB_MV_ID;
-    // nodeInfo.subModules[0].dataSize = 2; // 2 bytes
     nodeInfo.subModules[0].sendFeatureMask = false;
 
     nodeInfo.subModules[1].modType = NODE_CPU_TEMP_ID;
     nodeInfo.subModules[1].dataMsgId = DATA_NODE_CPU_TEMP_ID;
-    // nodeInfo.subModules[1].dataSize = 2; // 2 bytes
     nodeInfo.subModules[1].sendFeatureMask = false;
-
-    osDelay(2000);
 
     snprintf(msg, sizeof(msg), 
           "\r\n\r\n"
@@ -391,10 +405,6 @@ void StartDefaultTask(void const * argument)
     uint32_t jitter = (nodeInfo.nodeID & 0x1FF); 
     osDelay(jitter);
   
-    /* 3. Start the CAN tasks */
-    if (canRxTaskHandle != NULL) xTaskNotifyGive(canRxTaskHandle);
-    if (canTxTaskHandle != NULL) xTaskNotifyGive(canTxTaskHandle);
-        
     /* Set flag to send the introduction*/
     FLAG_SEND_INTRODUCTION = true; 
 
@@ -548,6 +558,8 @@ void StartCanTxTask(void const * argument) {
     /* Wait for the signal from StartDefaultTask */
     ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
 
+    SecureDebug("CAN TX: Task started\r\n");
+
     /* Initialize static header fields */
     txHeader.IdType = FDCAN_STANDARD_ID;
     txHeader.TxFrameType = FDCAN_DATA_FRAME;
@@ -566,26 +578,35 @@ void StartCanTxTask(void const * argument) {
 
             if (pMsg != NULL) {
                 txHeader.Identifier = pMsg->canID;
-
-                /* 3. Check for hardware space and transmit */
-                if (HAL_FDCAN_GetTxFifoFreeLevel(&hfdcan1) > 0) {
-                  if (HAL_FDCAN_AddMessageToTxFifoQ(&hfdcan1, &txHeader, (uint8_t*)&pMsg->payload) != HAL_OK) {
-                      SecureDebug("CAN HW Error\r\n");
-                  }
+                
+                /* Check the hardware level */
+                uint32_t freeLevel = HAL_FDCAN_GetTxFifoFreeLevel(&hfdcan1);
+                
+                if (freeLevel > 0) {
+                    txHeader.Identifier = pMsg->canID;
+                    if (HAL_FDCAN_AddMessageToTxFifoQ(&hfdcan1, &txHeader, (uint8_t*)&pMsg->payload) != HAL_OK) {
+                        SecureDebug("CAN HW Error: AddMessage Failed\r\n");
+                    }
                 } else {
-                  int retry = 0;
-                  while (HAL_FDCAN_GetTxFifoFreeLevel(&hfdcan1) == 0 && retry < 3) {
-                      osDelay(5); /* Give the hardware 5ms to clear a mailbox */
-                      retry++; 
-                  }
-                  if (retry >= 3) SecureDebug("CAN Mailbox Full\r\n");
+                    /* If this prints, the hardware is full and not sending */
+                    SecureDebug("CAN TX HW Full! Check wiring/bitrate.\r\n");
+                }
+                
+                /* Attempt transmission */
+                if (HAL_FDCAN_GetTxFifoFreeLevel(&hfdcan1) > 0) {
+                    if (HAL_FDCAN_AddMessageToTxFifoQ(&hfdcan1, &txHeader, (uint8_t*)&pMsg->payload) != HAL_OK) {
+                        SecureDebug("CAN HW Error\r\n");
+                    }
+                } else {
+                    /* If no space, drop the message or handle retry briefly */
+                    SecureDebug("CAN Mailbox Full - Dropping Msg\r\n");
                 }
 
-                /* 4. IMPORTANT: Free the memory back to the pool so it can be reused */
+                /* ALWAYS free the pointer pulled from the queue */
                 osPoolFree(canMsgPoolHandle, pMsg);
             }
 
-                        /* Define a structure to hold the protocol status */
+            /* Define a structure to hold the protocol status */
             FDCAN_ProtocolStatusTypeDef protocolStatus;
             
             /* Get the current status from the hardware */
