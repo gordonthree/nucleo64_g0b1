@@ -98,6 +98,22 @@ to exclude the API function. */
 header file. */
 /* USER CODE BEGIN 1 */
 #define configASSERT( x ) if ((x) == 0) {taskDISABLE_INTERRUPTS(); for( ;; );}
+
+#if defined(BOARD_STM32G0)
+/* STM32G0 Factory Calibration Addresses */
+#define TS_CAL1_ADDR        ((uint16_t*) (0x1FFF75A8UL))
+#define TS_CAL2_ADDR        ((uint16_t*) (0x1FFF75CAUL))
+#define VREFINT_CAL_ADDR    ((uint16_t*) (0x1FFF75AAUL))
+#define TS_CAL_VREF  3000 /* Calibration voltage in mV (usually 3300 or 3000) */
+#else
+/* Might be different cal addresses */
+#define TS_CAL1_ADDR        ((uint16_t*) (0x1FFF75A8UL))
+#define TS_CAL2_ADDR        ((uint16_t*) (0x1FFF75CAUL))
+#define VREFINT_CAL_ADDR    ((uint16_t*) (0x1FFF75AAUL))
+#define TS_CAL_VREF  3300 /* Calibration voltage in mV (usually 3300 or 3000) */
+#endif
+
+
 /* USER CODE END 1 */
 
 /* Definitions that map the FreeRTOS port interrupt handlers to their CMSIS
