@@ -110,15 +110,15 @@ void MX_FREERTOS_Init(void) {
   defaultTaskHandle = osThreadCreate(osThread(defaultTask), NULL);
 
   /* definition and creation of canRxTask */
-  osThreadDef(canRxTask, StartCanRxTask, osPriorityHigh, 0, 256);
+  osThreadDef(canRxTask, StartCanRxTask, osPriorityHigh, 0, 512);
   canRxTaskHandle = osThreadCreate(osThread(canRxTask), NULL);
 
   /* definition and creation of canTxTask */
-  osThreadDef(canTxTask, StartCanTxTask, osPriorityNormal, 0, 256);
+  osThreadDef(canTxTask, StartCanTxTask, osPriorityLow, 0, 512);
   canTxTaskHandle = osThreadCreate(osThread(canTxTask), NULL);
 
   /* definition and creation of debugTask */
-  osThreadDef(debugTask, StartDebugTask, osPriorityLow, 0, 256);
+  osThreadDef(debugTask, StartDebugTask, osPriorityAboveNormal, 0, 512);
   debugTaskHandle = osThreadCreate(osThread(debugTask), NULL);
 }
 
@@ -136,7 +136,7 @@ void SecureDebug(const char* str) {
     }
     
     /* 1. Allocate a buffer from the pool */
-    char* pMsg = (char*)osPoolAlloc(debugPoolHandle);
+    char* pMsg = (char*)osPoolCAlloc(debugPoolHandle); /* Non blocking, returns NULL if full */
     int msgSize = (DEBUG_MSG_SIZE - 1); /* subtract one for null termination */
 
     if (pMsg != NULL) {
@@ -239,7 +239,7 @@ static float internalTempFloat(uint32_t adc_val) {
 static void txSensorData(void) {
     /* Loop through sub-modules to send current readings */
     for (int i = 0; i < nodeInfo.subModCnt; i++) {
-        CAN_Msg_t *pNew = (CAN_Msg_t*)osPoolAlloc(canMsgPoolHandle);
+        CAN_Msg_t *pNew = (CAN_Msg_t*)osPoolCAlloc(canMsgPoolHandle);
         if (pNew == NULL) return;
 
         pNew->canID = nodeInfo.subModules[i].dataMsgId; /**< Set CAN MSG ID */
@@ -274,7 +274,7 @@ static void txIntroduction(void) {
 
     /* Cooldown to prevent spamming the bus every 100ms tick */
     static uint32_t lastSendTick = 0;
-    static char msg[DEBUG_MSG_SIZE] __attribute__((aligned(8)));
+    // static char msg[DEBUG_MSG_SIZE] __attribute__((aligned(8)));
     uint32_t currentTick = osKernelSysTick();
     
     if (currentTick - lastSendTick < 500) {
@@ -282,9 +282,9 @@ static void txIntroduction(void) {
     }
     lastSendTick = currentTick;
 
-    CAN_Msg_t *pNew = (CAN_Msg_t*)osPoolAlloc(canMsgPoolHandle); /* Allocate from Pool (Non-blocking) */
+    CAN_Msg_t *pNew = (CAN_Msg_t*)osPoolCAlloc(canMsgPoolHandle); /* Allocate from Pool (Non-blocking) */
     if (pNew == NULL) {
-      SecureDebug(("TX INTRO: Pool Error\r\n"));
+      SecureDebug(("INTRO: CAN msg pool full\r\n"));
       return;
     }
     uint16_t txMsgID = 0;
@@ -297,9 +297,9 @@ static void txIntroduction(void) {
             osPoolFree(canMsgPoolHandle, pNew); /* Release unused pool block */
             return;
         }
-        snprintf(msg, sizeof(msg), "TX INTRO: NODE INTRO Type %03x\r\n", txMsgID);
-        SecureDebug(msg);
-        // SecureDebug("TX: NODE INTRO Type %03x\r\n", txMsgID);
+        // snprintf(msg, sizeof(msg), "INTRO: NODE INTRO Type %03x\r\n", txMsgID);
+        // SecureDebug(msg);
+        SecureDebug("INTRO: Sending node identification\r\n");
         
         // Send the feature mask
         payload[0] = nodeInfo.featureMask[0]; 
@@ -309,21 +309,24 @@ static void txIntroduction(void) {
     else {
         uint8_t modIdx = (uint8_t)(introMsgPtr - 1); // Sub-modules start at ptr 1
         
-        if (modIdx >= nodeInfo.subModCnt) {
+        /* if index is beyond the range of defined modules, return to sender */
+        if (modIdx > nodeInfo.subModCnt) {
             osPoolFree(canMsgPoolHandle, pNew); /* Release unused pool block */
             return;
         }
 
-        txMsgID = nodeInfo.subModules[modIdx].modType; // Retrieve module type aka can message ID
+        /* Retrieve module type aka can message ID */
+        txMsgID = nodeInfo.subModules[modIdx].modType; 
         
+        /* if module type is not defined, return to sender */
         if (txMsgID == 0) {
             osPoolFree(canMsgPoolHandle, pNew); /* Release unused pool block */
             introMsgPtr++; /* Error condition, skip empty slot and move to next */
             return;
         }
-        snprintf(msg, sizeof(msg), "TX INTRO: MOD INTRO Type %03x at Idx %i\r\n", txMsgID, modIdx);
-        SecureDebug(msg);
-        // SecureDebug("TX: MOD INTRO Type %03x at Idx %i\r\n", txMsgID, modIdx);
+        // snprintf(msg, sizeof(msg), "TX INTRO: MOD INTRO Type %03x at Idx %i\r\n", txMsgID, modIdx);
+        // SecureDebug(msg);
+        SecureDebug("INTRO: Sending sub-module identification\r\n");
         
         if (nodeInfo.subModules[modIdx].sendFeatureMask) {
             // Send the feature mask
@@ -396,16 +399,13 @@ void StartDefaultTask(void const * argument)
     uint32_t jitter = (nodeInfo.nodeID & 0x1FF); 
     osDelay((2000 + jitter));
 
-    snprintf(msg, sizeof(msg), 
-          "\r\n\r\n"
-          "-----------------------\r\n"
-          "--- DEVICE IDENTITY ---\r\n"
-          "--NODE ID: 0x%08lX--\r\n"
-          "-----------------------\r\n\r\n", 
-          (uint32_t)nodeInfo.nodeID);
-          
-    /* Print to UART2 */
+    snprintf(msg, sizeof(msg), "\r\n\r\nNODE ID: 0x%08lX\r\n", (uint32_t)nodeInfo.nodeID);
     SecureDebug(msg); 
+
+    /* Standard FreeRTOS function to check remaining heap */
+    size_t freeHeap = xPortGetFreeHeapSize();
+    snprintf(msg, sizeof(msg), "Free Heap: %u bytes\r\n", (unsigned int)freeHeap);
+    SecureDebug(msg);
     
     /* Set flag to send the introduction*/
     FLAG_SEND_INTRODUCTION = true; 
@@ -477,10 +477,11 @@ const CAN_Dispatch_t can_dispatch_table[] = {
  * @retval None
  */
 void StartCanRxTask(void const * argument) {
+    osEvent event;
     CAN_Msg_t *pRx;
     
     /* Buffer to hold message strings */
-    static char msg[512] __attribute__((aligned(8))); 
+    static char msg[DEBUG_MSG_SIZE] __attribute__((aligned(8))); 
     
     /* 1. Wait for the signal from StartDefaultTask */
     ulTaskNotifyTake(pdTRUE, portMAX_DELAY); 
@@ -588,7 +589,7 @@ void StartCanTxTask(void const * argument) {
                 if (freeLevel > 0) {
                     txHeader.Identifier = pMsg->canID;
                     if (HAL_FDCAN_AddMessageToTxFifoQ(&hfdcan1, &txHeader, (uint8_t*)&pMsg->payload) != HAL_OK) {
-                        SecureDebug("CAN HW Error: AddMessage Failed\r\n");
+                        // SecureDebug("CAN HW Error: AddMessage Failed\r\n");
                     }
                 } else {
                     /* If this prints, the hardware is full and not sending */
@@ -599,35 +600,38 @@ void StartCanTxTask(void const * argument) {
                 osPoolFree(canMsgPoolHandle, pMsg);
             }
 
-            /* Define a structure to hold the protocol status */
-            FDCAN_ProtocolStatusTypeDef protocolStatus;
-            
-            /* Get the current status from the hardware */
-            HAL_FDCAN_GetProtocolStatus(&hfdcan1, &protocolStatus);
+            static uint32_t lastErrorLog = 0;
+            if (osKernelSysTick() - lastErrorLog > 1000) { /* Only log errors once per second */
+                /* Define a structure to hold the protocol status */
+                FDCAN_ProtocolStatusTypeDef protocolStatus;
+                
+                /* Get the current status from the hardware */
+                HAL_FDCAN_GetProtocolStatus(&hfdcan1, &protocolStatus);
 
-            /* 0=No Error, 1=Stuff, 2=Form, 3=Ack, 4=Bit1, 5=Bit0, 6=CRC */
-            uint8_t lec = protocolStatus.LastErrorCode; 
-            if (lec == 3) {
-                SecureDebug("CAN: No ACK detected - check wiring!\r\n");
-            }
+                /* 0=No Error, 1=Stuff, 2=Form, 3=Ack, 4=Bit1, 5=Bit0, 6=CRC */
+                uint8_t lec = protocolStatus.LastErrorCode; 
+                if (lec == 3) {
+                    SecureDebug("CAN: No ACK detected - check wiring!\r\n");
+                }
 
-            /* Check specifically for Bus-Off */
-            if (protocolStatus.BusOff) {
-                SecureDebug("CAN: Bus-Off detected! Attempting recovery...\r\n");
-                
-                /* 1. Stop the peripheral */
-                HAL_FDCAN_Stop(&hfdcan1);
-                
-                /* 2. Wait a bit for the bus to stabilize */
-                osDelay(100); 
-                
-                /* 3. Restart the peripheral */
-                if (HAL_FDCAN_Start(&hfdcan1) == HAL_OK) {
-                    /* 4. Re-enable notifications */
-                    HAL_FDCAN_ActivateNotification(&hfdcan1, FDCAN_IT_RX_FIFO0_NEW_MESSAGE, 0);
-                    SecureDebug("CAN: Recovery successful.\r\n");
-                } else {
-                    SecureDebug("CAN: Recovery failed.\r\n");
+                /* Check specifically for Bus-Off */
+                if (protocolStatus.BusOff) {
+                    SecureDebug("CAN: Bus-Off detected! Attempting recovery...\r\n");
+                    
+                    /* 1. Stop the peripheral */
+                    HAL_FDCAN_Stop(&hfdcan1);
+                    
+                    /* 2. Wait a bit for the bus to stabilize */
+                    osDelay(100); 
+                    
+                    /* 3. Restart the peripheral */
+                    if (HAL_FDCAN_Start(&hfdcan1) == HAL_OK) {
+                        /* 4. Re-enable notifications */
+                        HAL_FDCAN_ActivateNotification(&hfdcan1, FDCAN_IT_RX_FIFO0_NEW_MESSAGE, 0);
+                        SecureDebug("CAN: Recovery successful.\r\n");
+                    } else {
+                        SecureDebug("CAN: Recovery failed.\r\n");
+                    }
                 }
             }
         }
