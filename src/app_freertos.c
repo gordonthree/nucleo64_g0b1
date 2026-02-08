@@ -161,6 +161,7 @@ void Handle_DataEpoch(CAN_Msg_t *pMsg) {
     uint32_t unixTimestamp = __REV(rxTimeRev);
 
     /* Logic to set RTC goes here */
+    RTC_Set_Timestamp(&hrtc, unixTimestamp); /**< Set RTC hardware using provided timestamp */
     /* Convert to human readable string */
     time_t rawtime = (time_t)unixTimestamp;
     struct tm *timeinfo;
@@ -273,6 +274,7 @@ static void txIntroduction(void) {
 
     /* Cooldown to prevent spamming the bus every 100ms tick */
     static uint32_t lastSendTick = 0;
+    static char msg[DEBUG_MSG_SIZE] __attribute__((aligned(8)));
     uint32_t currentTick = osKernelSysTick();
     
     if (currentTick - lastSendTick < 500) {
@@ -280,7 +282,6 @@ static void txIntroduction(void) {
     }
     lastSendTick = currentTick;
 
-    static char msg[512] __attribute__((aligned(8)));
     CAN_Msg_t *pNew = (CAN_Msg_t*)osPoolAlloc(canMsgPoolHandle); /* Allocate from Pool (Non-blocking) */
     if (pNew == NULL) {
       SecureDebug(("TX INTRO: Pool Error\r\n"));
@@ -643,12 +644,12 @@ void StartDebugTask(void const * argument) {
             char* pStr = (char*)event.value.p;
             
             /* Grab the mutex before touching the UART hardware */
-            osMutexWait(uartMutexHandle, osWaitForever);
+            // osMutexWait(uartMutexHandle, osWaitForever);
             
             /* Send to UART */
             HAL_UART_Transmit(&huart2, (uint8_t*)pStr, strlen(pStr), 100);
             
-            osMutexRelease(uartMutexHandle);
+            // osMutexRelease(uartMutexHandle);
             
             /* IMPORTANT: Free the memory back to the pool! */
             osPoolFree(debugPoolHandle, pStr);
