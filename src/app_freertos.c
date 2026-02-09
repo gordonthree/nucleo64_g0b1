@@ -119,17 +119,8 @@ void Handle_DataEpoch(CAN_Msg_t *pMsg) {
 
     /* Logic to set RTC goes here */
     RTC_Set_Timestamp(&hrtc, unixTimestamp); /**< Set RTC hardware using provided timestamp */
-    /* Convert to human readable string */
-    time_t rawtime = (time_t)unixTimestamp;
-    struct tm *timeinfo;
-    // timeinfo = localtime(&rawtime);
-
-    // char dbg[128];
-    // snprintf(dbg, sizeof(dbg), "RTC Sync: %04d-%02d-%02d %02d:%02d:%02d\r\n", 
-    //          timeinfo->tm_year + 1900, timeinfo->tm_mon + 1, timeinfo->tm_mday,
-    //          timeinfo->tm_hour, timeinfo->tm_min, timeinfo->tm_sec);
-    
-    // SecureDebug(dbg);
+    /* Set a flag to print as human readable string */
+    FLAG_PRINT_TIMESTAMP = true;
 }
 
 
@@ -390,10 +381,7 @@ void StartDefaultTask(void const * argument)
                 txSensorData();
             }
         }         
-        else if (FLAG_SET_RTC_TIME) {
-             /* Code to set the RTC time goes here */
-        
-        }
+
 
         /* Check for CAN bus errors */
         FDCAN_ProtocolStatusTypeDef protocolStatus;
@@ -431,8 +419,23 @@ void StartDefaultTask(void const * argument)
         /* Toggle LED every 10 ticks (1000ms) */
         if (tickCounter % 10 == 0) {
             HAL_GPIO_TogglePin(LED_GREEN_GPIO_Port, LED_GREEN_Pin); /**< Toggle LED */
-            // snprintf(msg, sizeof(msg), "\r\nCPU Raw: %ld Flt: %.2f°C Int32: %ld\r\n", adc_buffer[1], internalTempFloat(adc_buffer[1]), internalTempInt(adc_buffer[1])); /**< Periodic CPU temp report */
-            // SecureDebug(msg); 
+
+            /* check to see if we need to print a timestamp */
+            /* flag is set once when RTC is synced by master */
+            if (FLAG_PRINT_TIMESTAMP) {
+                FLAG_PRINT_TIMESTAMP = false; /* Reset flag */
+                time_t rawtime = (time_t)RTC_Get_Timestamp(&hrtc); /* Read time from RTC */
+                struct tm *timeinfo;
+                timeinfo = localtime(&rawtime);
+
+                char dbg[128];
+                snprintf(dbg, sizeof(dbg), "RTC Sync: %04d-%02d-%02d %02d:%02d:%02d\r\n", 
+                        timeinfo->tm_year + 1900, timeinfo->tm_mon + 1, timeinfo->tm_mday,
+                        timeinfo->tm_hour, timeinfo->tm_min, timeinfo->tm_sec);
+                
+                SecureDebug(dbg);
+            
+            }
         }
     
         /* Increment global tick and reset at a high number to prevent overflow */
