@@ -38,15 +38,15 @@ osThreadId canRxTaskHandle;
 
 /* Define the message pool: 16 blocks of type CAN_Msg_t */
 osPoolId canMsgPoolHandle;
-osPoolDef(canMsgPool, 16, CAN_Msg_t); 
+osPoolDef(canMsgPool, CAN_MSG_POOL_LEN, CAN_Msg_t); 
 
 /* Define the TX pointer queue: 16 slots, each holding a POINTER (uint32_t) */
 osMessageQId canTxQueueHandle;
-osMessageQDef(canTxQueue, 16, uint32_t);
+osMessageQDef(canTxQueue, CAN_TX_QUEUE_LEN, uint32_t);
 
 /* Define the RX pointer queue: 16 slots, each holding a POINTER (uint32_t) */
 osMessageQId canRxQueueHandle;
-osMessageQDef(canRxQueue, 16, uint32_t);
+osMessageQDef(canRxQueue, CAN_RX_QUEUE_LEN, uint32_t);
 
 /* Global function prototypes -----------------------------------------------*/
 
