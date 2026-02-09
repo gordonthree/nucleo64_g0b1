@@ -71,6 +71,8 @@ static void Handle_SystemGroup(CAN_Msg_t *pMsg);
 static void Handle_SwitchGroup(CAN_Msg_t *pMsg);
 static void Handle_DisplayGroup(CAN_Msg_t *pMsg);
 
+static void txHeartbeatEpoch(void);
+
 
 /* Dispatch table configuration */
 typedef void (*CAN_Handler_t)(CAN_Msg_t *pMsg);
@@ -175,15 +177,18 @@ static void txSensorData(void) {
         *(uint32_t*)&pData[0] = __REV(nodeInfo.nodeID);
 
         /* Handle Float vs Integer based on Message ID */
-        if (nodeInfo.subModules[i].modType == NODE_CPU_TEMP_ID) {
+        if (nodeInfo.subModules[i].modType == DATA_NODE_CPU_TEMP_ID) {
             float temp = nodeInfo.subModules[i].data.fltValue;
             /* Copy float bits into a uint32 for the byte swapper */
             uint32_t raw_bits;
             memcpy(&raw_bits, &temp, 4);
             *(uint32_t*)&pData[4] = __REV(raw_bits);
-        } else {
+            pNew->DLC = DATA_NODE_CPU_TEMP_DLC; /* set DLC based on message type */
+        } else if (nodeInfo.subModules[i].modType == DATA_ANALOG_KNOB_MV_ID) {
             /* Standard integer for Knob */
             *(uint32_t*)&pData[4] = __REV(nodeInfo.subModules[i].data.i32Value);
+            pNew->DLC = DATA_ANALOG_KNOB_MV_DLC; /* set DLC based on message type */
+
         }
 
         if (osMessagePut(canTxQueueHandle, (uint32_t)pNew, 0) != osOK) {
@@ -199,6 +204,7 @@ static void txIntroduction(void) {
     /* Cooldown to prevent spamming the bus every 100ms tick */
     static uint32_t lastSendTick = 0;
     uint32_t currentTick = osKernelSysTick();
+    uint8_t msgDLC = 8; /* Classic CAN always 8 bytes unless otherwise indicated */
     
     if (currentTick - lastSendTick < 500) {
         return; /* Wait at least 500ms before re-transmitting the same packet */
@@ -216,7 +222,8 @@ static void txIntroduction(void) {
 
     // --- STEP 0: Introduce the Node itself ---
     if (introMsgPtr == 0) {
-        txMsgID = nodeInfo.nodeTypeMsg; // Retrieve node type aka can message ID
+        txMsgID = nodeInfo.nodeTypeMsg; /* Retrieve node type aka can message ID */
+        msgDLC = nodeInfo.nodeTypeDLC; /* set DLC based on message type */
         if (txMsgID == 0) {
             osPoolFree(canMsgPoolHandle, pNew); /* Release unused pool block */
             return;
@@ -259,6 +266,7 @@ static void txIntroduction(void) {
     /* Assemble the final 8-byte CAN Frame */
     pNew->canID = txMsgID;
 
+    pNew->DLC = msgDLC;
     /* Get a pointer to the start of the payload as a byte array */
     uint8_t *pData = (uint8_t*)&pNew->payload; 
 
@@ -358,6 +366,11 @@ void StartDefaultTask(void const * argument)
             if (tickCounter % 10 == 0) {
                 txSensorData();
             }
+            /* Send Heartbeat Epoch every 10 seconds (100 * 100ms) */
+            if (tickCounter % 100 == 0) {
+                txHeartbeatEpoch();
+                // SecureDebug("SYS: Sent Heartbeat Epoch\r\n");
+            }
         }         
 
 
@@ -424,6 +437,36 @@ void StartDefaultTask(void const * argument)
         osDelay(100);
     }
   /* END StartDefaultTask */
+}
+
+/**
+ * @brief Sends the current RTC timestamp to the master as a heartbeat.
+ * @details Uses message ID 0x40C (DATA_EPOCH_ID).
+ */
+static void txHeartbeatEpoch(void) {
+    /* 1. Allocate a message from the pool */
+    CAN_Msg_t *pMsg = (CAN_Msg_t*)osPoolCAlloc(canMsgPoolHandle);
+    if (pMsg == NULL) return;
+
+    /* 2. Get current Unix timestamp from your RTC helper */
+    uint32_t currentUnixTime = RTC_Get_Timestamp(&hrtc);
+
+    /* 3. Prepare the CAN message */
+    pMsg->canID = DATA_EPOCH_ID; /* 0x40C */
+    pMsg->DLC = DATA_EPOCH_DLC; /* 8 bytes*/
+
+    uint8_t *pData = (uint8_t*)&pMsg->payload;
+
+    /* Bytes 0-3: Your Node ID (reversed for Big-Endian) */
+    *(uint32_t*)&pData[0] = __REV(nodeInfo.nodeID);
+
+    /* Bytes 4-7: The Unix Timestamp (reversed for Big-Endian) */
+    *(uint32_t*)&pData[4] = __REV(currentUnixTime);
+
+    /* 4. Send to the TX queue */
+    if (osMessagePut(canTxQueueHandle, (uint32_t)pMsg, 0) != osOK) {
+        osPoolFree(canMsgPoolHandle, pMsg);
+    }
 }
 
 static void Handle_DataEpoch(CAN_Msg_t *pMsg) {
@@ -712,7 +755,6 @@ void StartCanTxTask(void const * argument) {
     /* Initialize static header fields */
     txHeader.IdType = FDCAN_STANDARD_ID;
     txHeader.TxFrameType = FDCAN_DATA_FRAME;
-    txHeader.DataLength = FDCAN_DLC_BYTES_8;
     txHeader.ErrorStateIndicator = FDCAN_ESI_ACTIVE;
     txHeader.BitRateSwitch = FDCAN_BRS_OFF;
     txHeader.FDFormat = FDCAN_CLASSIC_CAN;
@@ -726,7 +768,14 @@ void StartCanTxTask(void const * argument) {
             pMsg = (CAN_Msg_t*)event.value.p;
 
             if (pMsg != NULL) {
-                txHeader.Identifier = pMsg->canID;
+                txHeader.Identifier = pMsg->canID; /* Set the Message ID */
+                
+                if (pMsg->DLC > 8 || pMsg->DLC < 4) {
+                    txHeader.DataLength = FDCAN_DLC_BYTES_8; /* Set the DLC to 8 if there's a problem */
+                } 
+                else {
+                    txHeader.DataLength = (uint8_t)pMsg->DLC; /* Set the DLC from the queued message */
+                }
 
                 /* 3. Check for hardware space and transmit */
                 if (HAL_FDCAN_GetTxFifoFreeLevel(&hfdcan1) > 0) {
@@ -736,7 +785,7 @@ void StartCanTxTask(void const * argument) {
                 } else {
                   int retry = 0;
                   while (HAL_FDCAN_GetTxFifoFreeLevel(&hfdcan1) == 0 && retry < 5) {
-                      osDelay(2); /* Give the hardware 5ms to clear a mailbox */
+                      osDelay(2); /* Give the hardware 10ms to clear a mailbox */
                       retry++; 
                   }
                   if (retry >= 5) SecureDebug("CAN Mailbox Full\r\n");
