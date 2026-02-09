@@ -69,7 +69,6 @@ static void Handle_DataEpoch(CAN_Msg_t *pMsg);
 static void Handle_SensorGroup(CAN_Msg_t *pMsg);
 static void Handle_SystemGroup(CAN_Msg_t *pMsg);
 static void Handle_SwitchGroup(CAN_Msg_t *pMsg);
-static void Handle_LedStripGroup(CAN_Msg_t *pMsg);
 static void Handle_DisplayGroup(CAN_Msg_t *pMsg);
 
 
@@ -473,7 +472,7 @@ static void Handle_SwitchGroup(CAN_Msg_t *pMsg) {
     }
 }
 
-/* --- Group 2: Display & OLED (0x200 - 0x20E) --- */
+/* --- Group 2: Display & Led (0x200 - 0x2..) --- */
 static void Handle_DisplayGroup(CAN_Msg_t *pMsg) {
     switch (pMsg->canID) {
         case SET_DISPLAY_OFF_ID:   SecureDebug("DISP: OFF\r\n");    break;
@@ -481,13 +480,6 @@ static void Handle_DisplayGroup(CAN_Msg_t *pMsg) {
         case SET_DISPLAY_CLEAR_ID: SecureDebug("DISP: Clear\r\n");  break;
         case SET_OLED_FIELD_COLOR_ID: SecureDebug("OLED: Color\r\n"); break;
         case DISPLAY_DATA_MSG_ID:  SecureDebug("DISP: Data RX\r\n"); break;
-        default: break;
-    }
-}
-
-/* --- Group 3: LED Strips (0x210 - 0x216) --- */
-static void Handle_LedStripGroup(CAN_Msg_t *pMsg) {
-    switch (pMsg->canID) {
         case SET_ARGB_STRIP_COLOR_ID:  SecureDebug("LED: ARGB Color\r\n"); break;
         case SET_ADDR_STRIP_EFFECT_ID: SecureDebug("LED: Effect\r\n");     break;
         case SET_LED_STRIP_BRIGHTNESS_ID: SecureDebug("LED: Bright\r\n");  break;
@@ -495,7 +487,7 @@ static void Handle_LedStripGroup(CAN_Msg_t *pMsg) {
         default: break;
     }
 }
-
+/* --- Group 3: Systems management (0x400 - 0x4xx) --- */
 static void Handle_SystemGroup(CAN_Msg_t *pMsg) {
     switch (pMsg->canID) {
         case ACK_INTRO_ID:      Handle_AckIntro(pMsg);      break; /* 0x400 */
@@ -544,6 +536,7 @@ static void Handle_SystemGroup(CAN_Msg_t *pMsg) {
         // HAL_NVIC_SystemReset();
 }
 
+/* --- Group 4: Inputs, sensors and telemetry (0x500 - 0x5xx) --- */
 static void Handle_SensorGroup(CAN_Msg_t *pMsg) {
     switch (pMsg->canID) {
         /* Analog physical interface data */
@@ -608,14 +601,13 @@ typedef struct {
 */
 const CAN_Dispatch_t can_dispatch_table[] = {
     /* --- 0x100 Series (Switches) --- */
-    { 0x112,             Handle_SwitchGroup   }, /* 0x112 - 0x11B */
+    { 0x112,             Handle_SwitchGroup   }, /* 0x112 - 0x13F */
     
     /* --- 0x200 Series (Output/UI) --- */
-    { 0x200,             Handle_DisplayGroup  }, /* 0x200 - 0x20E */
-    { 0x210,             Handle_LedStripGroup }, /* 0x210 - 0x216 */
+    { 0x200,             Handle_DisplayGroup  }, /* 0x200 - 0x23F */
     
     /* --- 0x400 Series (System/Management) --- */
-    { 0x400,             Handle_SystemGroup   }, /* 0x400 - 0x40C */
+    { 0x400,             Handle_SystemGroup   }, /* 0x400 - 0x43F */
     
     /* --- 0x500 Series (Sensor/Telemetry) --- */
     { 0x500,             Handle_SensorGroup   }  /* 0x500 - 0x53F */
@@ -659,22 +651,43 @@ void StartCanRxTask(void const * argument) {
         if (event.status == osEventMessage) {
             CAN_Msg_t *pRx = (CAN_Msg_t*)event.value.p;
             uint32_t msgRemoteId = __REV(*(uint32_t*)&pRx->payload);
+            bool found = false;
 
             if (msgRemoteId == nodeInfo.nodeID) {
                 /* RANGE-BASED DISPATCH LOGIC */
                 for (int i = 0; i < DISPATCH_COUNT; i++) {
-                    /* If it's an exact match OR if it's the start of a range 
-                       (We assume anything from the table ID up to the next 
-                       16 IDs belongs to that group)
-                    */
-                    if (pRx->canID == can_dispatch_table[i].msgID || 
-                       (pRx->canID >= can_dispatch_table[i].msgID && pRx->canID < can_dispatch_table[i].msgID + 0x10)) 
-                    {
+                    uint16_t id = pRx->canID;
+                    uint16_t base = can_dispatch_table[i].msgID;
+
+                    /* Range check for 0x100 (Switches) */
+                    if (base == 0x112 && (id >= 0x112 && id <= 0x13F)) {
                         can_dispatch_table[i].handler(pRx);
-                        break;
+                        found = true;
                     }
+                    /* Range check for 0x200 (Displays & LED Strips) */
+                    else if (base == 0x200 && (id >= 0x200 && id <= 0x23F)) {
+                        can_dispatch_table[i].handler(pRx);
+                        found = true;
+                    }
+                    /* Range check for 0x400 (System Management) */
+                    else if (base == 0x400 && (id >= 0x400 && id <= 0x43F)) {
+                        can_dispatch_table[i].handler(pRx);
+                        found = true;
+                    }
+                    /* Range check for 0x500 (Sensors & Telemetry) */
+                    else if (base == 0x500 && (id >= 0x500 && id <= 0x53F)) {
+                        can_dispatch_table[i].handler(pRx);
+                        found = true;
+                    }
+
+                    if (found) break;
                 }
-            }
+
+                if (!found) {
+                    /* Optional: Debug for valid Node IDs that don't match a command */
+                    // SecureDebug("CAN RX: Valid Node ID but Unknown Command Range\r\n");
+                }
+        }
             osPoolFree(canMsgPoolHandle, pRx);
         }
     }         
