@@ -394,7 +394,39 @@ void StartDefaultTask(void const * argument)
              /* Code to set the RTC time goes here */
         
         }
-    
+
+        /* Check for CAN bus errors */
+        FDCAN_ProtocolStatusTypeDef protocolStatus;
+        
+        /* Get the current status from the hardware */
+        HAL_FDCAN_GetProtocolStatus(&hfdcan1, &protocolStatus);
+
+        /* 0=No Error, 1=Stuff, 2=Form, 3=Ack, 4=Bit1, 5=Bit0, 6=CRC */
+        uint8_t lec = protocolStatus.LastErrorCode; 
+        if (lec == 3) {
+            SecureDebug("CAN: No ACK detected - check wiring!\r\n");
+        }
+
+        /* Check specifically for Bus-Off */
+        if (protocolStatus.BusOff) {
+            SecureDebug("CAN: Bus-Off detected! Attempting recovery...\r\n");
+            
+            /* 1. Stop the peripheral */
+            HAL_FDCAN_Stop(&hfdcan1);
+            
+            /* 2. Wait a bit for the bus to stabilize */
+            osDelay(100); 
+            
+            /* 3. Restart the peripheral */
+            if (HAL_FDCAN_Start(&hfdcan1) == HAL_OK) {
+                /* 4. Re-enable notifications */
+                HAL_FDCAN_ActivateNotification(&hfdcan1, FDCAN_IT_RX_FIFO0_NEW_MESSAGE, 0);
+                SecureDebug("CAN: Recovery successful.\r\n");
+            } else {
+                SecureDebug("CAN: Recovery failed.\r\n");
+            }
+        }
+        
         /* --- SECTION B: LOW PRIORITY UI/HEARTBEAT LOGIC --- */
         /* Toggle LED every 10 ticks (1000ms) */
         if (tickCounter % 10 == 0) {
@@ -555,37 +587,7 @@ void StartCanTxTask(void const * argument) {
                 osPoolFree(canMsgPoolHandle, pMsg);
             }
 
-                        /* Define a structure to hold the protocol status */
-            FDCAN_ProtocolStatusTypeDef protocolStatus;
-            
-            /* Get the current status from the hardware */
-            HAL_FDCAN_GetProtocolStatus(&hfdcan1, &protocolStatus);
 
-            /* 0=No Error, 1=Stuff, 2=Form, 3=Ack, 4=Bit1, 5=Bit0, 6=CRC */
-            uint8_t lec = protocolStatus.LastErrorCode; 
-            if (lec == 3) {
-                SecureDebug("CAN: No ACK detected - check wiring!\r\n");
-            }
-
-            /* Check specifically for Bus-Off */
-            if (protocolStatus.BusOff) {
-                SecureDebug("CAN: Bus-Off detected! Attempting recovery...\r\n");
-                
-                /* 1. Stop the peripheral */
-                HAL_FDCAN_Stop(&hfdcan1);
-                
-                /* 2. Wait a bit for the bus to stabilize */
-                osDelay(100); 
-                
-                /* 3. Restart the peripheral */
-                if (HAL_FDCAN_Start(&hfdcan1) == HAL_OK) {
-                    /* 4. Re-enable notifications */
-                    HAL_FDCAN_ActivateNotification(&hfdcan1, FDCAN_IT_RX_FIFO0_NEW_MESSAGE, 0);
-                    SecureDebug("CAN: Recovery successful.\r\n");
-                } else {
-                    SecureDebug("CAN: Recovery failed.\r\n");
-                }
-            }
         }
     }
 }
