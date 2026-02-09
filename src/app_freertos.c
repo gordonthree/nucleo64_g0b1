@@ -63,6 +63,16 @@ static void txSensorData(void); /**< Function to send sensor data to the can bus
 static float internalTempFloat(uint32_t adc_val);
 static void SecureDebug(const char* buffer);
 
+static void Handle_ReqNodeIntro(CAN_Msg_t *pMsg);
+static void Handle_AckIntro(CAN_Msg_t *pMsg);
+static void Handle_DataEpoch(CAN_Msg_t *pMsg);
+static void Handle_SensorGroup(CAN_Msg_t *pMsg);
+static void Handle_SystemGroup(CAN_Msg_t *pMsg);
+static void Handle_SwitchGroup(CAN_Msg_t *pMsg);
+static void Handle_LedStripGroup(CAN_Msg_t *pMsg);
+static void Handle_DisplayGroup(CAN_Msg_t *pMsg);
+
+
 /* Dispatch table configuration */
 typedef void (*CAN_Handler_t)(CAN_Msg_t *pMsg);
 
@@ -104,43 +114,12 @@ void MX_FREERTOS_Init(void) {
 
 static void SecureDebug(const char* buffer) {
     // Note: use the handle directly or your getter
-    if (osMutexWait(uartMutexHandle, osWaitForever) == osOK) {
+    if (osMutexWait(uartMutexHandle, 100) == osOK) { /* Wait 100ms for the mutex */
         HAL_UART_Transmit(&huart2, (uint8_t*)buffer, strlen(buffer), 100);
         osMutexRelease(uartMutexHandle);
     }
 }
-void Handle_DataEpoch(CAN_Msg_t *pMsg) {
-    uint32_t rxTimeRev;
-    
-    /* Cast the address of the payload to a byte pointer to satisfy memcpy */
-    // memcpy(&rxTimeRev, (uint8_t*)&pMsg->payload, 4);
-    memcpy(&rxTimeRev, ((uint8_t*)&pMsg->payload) + 4, 4);    
-    uint32_t unixTimestamp = __REV(rxTimeRev);
 
-    /* Logic to set RTC goes here */
-    RTC_Set_Timestamp(&hrtc, unixTimestamp); /**< Set RTC hardware using provided timestamp */
-    /* Set a flag to print as human readable string */
-    FLAG_PRINT_TIMESTAMP = true;
-}
-
-
-void Handle_ReqNodeIntro(CAN_Msg_t *pMsg) {
-    FLAG_BEGIN_NORMAL_OPER = false;
-    FLAG_SEND_INTRODUCTION = true;
-    introMsgPtr = 0;
-    SecureDebug("CAN RX: Master Requested Intro\r\n");
-}
-
-void Handle_AckIntro(CAN_Msg_t *pMsg) {
-    if (FLAG_SEND_INTRODUCTION) {
-        introMsgPtr++;
-        if (introMsgPtr > nodeInfo.subModCnt) {
-            FLAG_SEND_INTRODUCTION = false;
-            FLAG_BEGIN_NORMAL_OPER = true;
-            SecureDebug("CAN RX: Intro Sequence Complete\r\n");
-        }
-    }
-}
 /**
  * @brief Calculate the internal CPU temperature using factory calibration.
  * @param adc_val The raw 12-bit ADC reading from the temp sensor channel.
@@ -447,17 +426,199 @@ void StartDefaultTask(void const * argument)
     }
   /* END StartDefaultTask */
 }
+
+static void Handle_DataEpoch(CAN_Msg_t *pMsg) {
+    uint32_t rxTimeRev;
+    
+    /* Cast the address of the payload to a byte pointer to satisfy memcpy */
+    // memcpy(&rxTimeRev, (uint8_t*)&pMsg->payload, 4);
+    memcpy(&rxTimeRev, ((uint8_t*)&pMsg->payload) + 4, 4);    
+    uint32_t unixTimestamp = __REV(rxTimeRev);
+
+    /* Logic to set RTC goes here */
+    RTC_Set_Timestamp(&hrtc, unixTimestamp); /**< Set RTC hardware using provided timestamp */
+    /* Set a flag to print as human readable string */
+    FLAG_PRINT_TIMESTAMP = true;
+}
+
+
+static void Handle_ReqNodeIntro(CAN_Msg_t *pMsg) {
+    FLAG_BEGIN_NORMAL_OPER = false;
+    FLAG_SEND_INTRODUCTION = true;
+    introMsgPtr = 0;
+    SecureDebug("CAN RX: Master Requested Intro\r\n");
+}
+
+static void Handle_AckIntro(CAN_Msg_t *pMsg) {
+    if (FLAG_SEND_INTRODUCTION) {
+        introMsgPtr++;
+        if (introMsgPtr > nodeInfo.subModCnt) {
+            FLAG_SEND_INTRODUCTION = false;
+            FLAG_BEGIN_NORMAL_OPER = true;
+            SecureDebug("CAN RX: Intro Sequence Complete\r\n");
+        }
+    }
+}
+
+/* --- Group 1: Switches (0x112 - 0x11B) --- */
+static void Handle_SwitchGroup(CAN_Msg_t *pMsg) {
+    /* You can extract common data here, like payload bytes */
+    switch (pMsg->canID) {
+        case SW_SET_MODE_ID:       SecureDebug("SW: Set Mode\r\n"); break;
+        case SW_SET_OFF_ID:        SecureDebug("SW: Set OFF\r\n");  break;
+        case SW_SET_ON_ID:         SecureDebug("SW: Set ON\r\n");   break;
+        case SW_MOM_PRESS_ID:      SecureDebug("SW: Mom Press\r\n"); break;
+        case SW_SET_PWM_DUTY_ID:   SecureDebug("SW: PWM Duty\r\n"); break;
+        default: break;
+    }
+}
+
+/* --- Group 2: Display & OLED (0x200 - 0x20E) --- */
+static void Handle_DisplayGroup(CAN_Msg_t *pMsg) {
+    switch (pMsg->canID) {
+        case SET_DISPLAY_OFF_ID:   SecureDebug("DISP: OFF\r\n");    break;
+        case SET_DISPLAY_ON_ID:    SecureDebug("DISP: ON\r\n");     break;
+        case SET_DISPLAY_CLEAR_ID: SecureDebug("DISP: Clear\r\n");  break;
+        case SET_OLED_FIELD_COLOR_ID: SecureDebug("OLED: Color\r\n"); break;
+        case DISPLAY_DATA_MSG_ID:  SecureDebug("DISP: Data RX\r\n"); break;
+        default: break;
+    }
+}
+
+/* --- Group 3: LED Strips (0x210 - 0x216) --- */
+static void Handle_LedStripGroup(CAN_Msg_t *pMsg) {
+    switch (pMsg->canID) {
+        case SET_ARGB_STRIP_COLOR_ID:  SecureDebug("LED: ARGB Color\r\n"); break;
+        case SET_ADDR_STRIP_EFFECT_ID: SecureDebug("LED: Effect\r\n");     break;
+        case SET_LED_STRIP_BRIGHTNESS_ID: SecureDebug("LED: Bright\r\n");  break;
+        case SET_LED_STRIP_OFF_ID:     SecureDebug("LED: OFF\r\n");        break;
+        default: break;
+    }
+}
+
+static void Handle_SystemGroup(CAN_Msg_t *pMsg) {
+    switch (pMsg->canID) {
+        case ACK_INTRO_ID:      Handle_AckIntro(pMsg);      break; /* 0x400 */
+        case REQ_NODE_INTRO_ID: Handle_ReqNodeIntro(pMsg);  break; /* 0x401 */
+        case DATA_EPOCH_ID:     Handle_DataEpoch(pMsg);     break; /* 0x40C */
+        
+        case MSG_NORM_OPER_ID:  
+            FLAG_BEGIN_NORMAL_OPER = true;
+            FLAG_HALT_NORMAL_OPER  = false;
+            break; /* 0x402 */
+
+        case MSG_HALT_OPER_ID:
+            FLAG_BEGIN_NORMAL_OPER = false;
+            FLAG_HALT_NORMAL_OPER  = true;
+            break; /* 0x403 */
+
+        case REQ_NODECHECK_ID:   SecureDebug("SYS: Node Check"); /* 0x404 */
+            break;
+        case REQ_HEALTHCHECK_ID: SecureDebug("SYS: Health Check"); /* 0x405 */
+            break;
+        case REQ_IFACE_ID:       SecureDebug("SYS: Request Interfaces"); /* 0x406 */
+            break;
+        case REQ_SWITCHBOX_ID:   SecureDebug("SYS: Request Switch Boxes"); /* 0x407 */
+            break;
+        case REQ_BUTTONS_ID:     SecureDebug("SYS: Request Buttons"); /* 0x410 */
+            break;
+        case REQ_OUTPUTS_ID:     SecureDebug("SYS: Request Outputs"); /* 0x411 */
+            break;
+        case REQ_DISPLAYS_ID:    SecureDebug("SYS: Request Displays"); /* 0x412 */
+            break;
+        case REQ_TEMP_SENSOR_ID: SecureDebug("SYS: Request Temp Sensor"); /* 0x413 */
+            break;    
+        case REQ_VOLT_SENSOR_ID: SecureDebug("SYS: Request Volt Sensor"); /* 0x414 */
+            break;  
+        case REQ_AMP_SENSOR_ID:  SecureDebug("SYS: Request Amp Sensor"); /* 0x415 */
+            break;  
+        case REQ_CLOSURE_INPUT_ID: SecureDebug("SYS: Request Closure Input"); /* 0x416 */
+            break;  
+        case REQ_AMBIENT_LIGHT_ID: SecureDebug("SYS: Request Ambient Light"); /* 0x417 */
+            break;  
+        case REQ_IMU_SENSORS_ID: SecureDebug("SYS: Request IMU Sensors"); /* 0x418 */
+            break;
+            
+        default: break;
+        }
+        // HAL_NVIC_SystemReset();
+}
+
+static void Handle_SensorGroup(CAN_Msg_t *pMsg) {
+    switch (pMsg->canID) {
+        /* Analog physical interface data */
+        case DATA_BUTTON_DOWN_ID:       SecureDebug("DATA: Button down\r\n"); break; /* 0x500 */
+        case DATA_BUTTON_UP_ID:         SecureDebug("DATA: Button up\r\n"); break; /* 0x501 */
+        case DATA_KEYSWITCH_LOCK_ID:    SecureDebug("DATA: Keyswitch lock\r\n"); break; /* 0x502 */
+        case DATA_KEYSWITCH_UNLOCK_ID:  SecureDebug("DATA: Keyswitch unlock\r\n"); break; /* 0x503 */
+        case DATA_DIAL_CLOCKWISE_ID:    SecureDebug("DATA: Dial clockwise\r\n"); break; /* 0x504 */
+        case DATA_DIAL_COUNTER_CLOCKWISE_ID: SecureDebug("DATA: Dial counter clockwise\r\n"); break; /* 0x505 */
+        case DATA_DIAL_CLICK_ID:        SecureDebug("DATA: Dial click\r\n"); break; /* 0x506 */
+        case DATA_RFID_READ_ID:         SecureDebug("DATA: RFID read\r\n"); break; /* 0x507 */
+        case DATA_CONTACT_CLOSED_ID:    SecureDebug("DATA: Contact closed\r\n"); break; /* 0x508 */
+        case DATA_CONTACT_OPENED_ID:    SecureDebug("DATA: Contact opened\r\n"); break; /* 0x509 */ 
+        case DATA_ANALOG_KNOB_MV_ID: SecureDebug("DATA: Analog knob mv\r\n"); break; /* 0x518 */
+        case DATA_AMBIENT_LIGHT_USE_PRIV_MSG_ID: SecureDebug("DATA: Ambient light USE PRIV MSG\r\n"); break; /* 0x510 */
+        case DATA_OUTPUT_SWITCH_MOM_PUSH_ID: SecureDebug("DATA: Output switch mom push\r\n"); break; /* 0x519 */
+        case DATA_OUTPUT_SWITCH_STATE_ID: SecureDebug("DATA: Output switch state\r\n"); break; /* 0x51D */
+
+
+        /* Temperature, voltage and current Data */
+        case DATA_INTERNAL_TEMPERATURE_ID: SecureDebug("DATA: Internal temperature\r\n"); break; /* 0x50A */
+        case DATA_INTERNAL_PCB_VOLTS_ID: SecureDebug("DATA: Internal pcb volts\r\n"); break; /* 0x50B */
+        case DATA_INTERNAL_PCB_CURRENT_ID: SecureDebug("DATA: Internal pcb current\r\n"); break; /* 0x50C */
+        case DATA_EXTERNAL_TEMPERATURE_ID: SecureDebug("DATA: External temperature\r\n"); break; /* 0x50D */
+        case DATA_EXTERNAL_VOLTS_ID: SecureDebug("DATA: External volts\r\n"); break; /* 0x50E */
+        case DATA_EXTERNAL_CURRENT_ID: SecureDebug("DATA: External current\r\n"); break; /* 0x50F */
+        case DATA_NODE_CPU_TEMP_ID: SecureDebug("DATA: Node CPU temp\r\n"); break; /* 0x51A */
+        case DATA_NODE_PCB_TEMP_ID: SecureDebug("DATA: Node PCB temp\r\n"); break; /* 0x51C */
+
+        
+        /* IMU Data */
+        case DATA_IMU_X_AXIS_ID: SecureDebug("DATA: IMU X Axis USE PRIV MSG\r\n"); break; /* 0x511 */
+        case DATA_IMU_Y_AXIS_ID: SecureDebug("DATA: IMU Y Axis USE PRIV MSG\r\n"); break; /* 0x512 */
+        case DATA_IMU_Z_AXIS_ID: SecureDebug("DATA: IMU Z Axis USE PRIV MSG\r\n"); break; /* 0x513 */
+        case DATA_IMU_X_GYRO_ID: SecureDebug("DATA: IMU X Gyro USE PRIV MSG\r\n"); break; /* 0x514 */
+        case DATA_IMU_Y_GYRO_ID: SecureDebug("DATA: IMU Y Gyro USE PRIV MSG\r\n"); break; /* 0x515 */
+        case DATA_IMU_Z_GYRO_ID: SecureDebug("DATA: IMU Z Gyro USE PRIV MSG\r\n"); break; /* 0x516 */
+        case DATA_IMU_TEMPERATURE_ID: SecureDebug("DATA: IMU temperature\r\n"); break; /* 0x517 */
+        
+        /* Other Data */
+        case DATA_NODE_LAST_BOOT_TIMESTAMP_ID: SecureDebug("DATA: Node last boot timestamp\r\n"); break; /* 0x51B */
+
+        /* ARGB Data */
+        case DATA_ARGB_BUTTON_COLOR_ID: SecureDebug("DATA: ARGB button color\r\n"); break; /* 0x524 */
+        case DATA_ARGB_BUTTON_LED_MODE_ID: SecureDebug("DATA: ARGB button led mode\r\n"); break; /* 0x525 */
+
+
+        default: 
+            /* Useful for debugging non-implemented sensors */
+            // SecureDebug("DATA: Unknown Sensor ID\r\n"); 
+            break;
+    }
+}
 /* Dispatch table configuration */
 typedef struct {
     uint16_t msgID;
     CAN_Handler_t handler;
 } CAN_Dispatch_t;
 
-/* The actual table - make it 'const' to save RAM and put it in Flash */
+/* We define the ranges in the table. 
+   The RX task will now look for the first range that fits.
+*/
 const CAN_Dispatch_t can_dispatch_table[] = {
-    { REQ_NODE_INTRO_ID, Handle_ReqNodeIntro },  /* 0x401 */
-    { ACK_INTRO_ID,      Handle_AckIntro      }, /* 0x400 */
-    { DATA_EPOCH_ID,     Handle_DataEpoch     }, /* 0x40C */
+    /* --- 0x100 Series (Switches) --- */
+    { 0x112,             Handle_SwitchGroup   }, /* 0x112 - 0x11B */
+    
+    /* --- 0x200 Series (Output/UI) --- */
+    { 0x200,             Handle_DisplayGroup  }, /* 0x200 - 0x20E */
+    { 0x210,             Handle_LedStripGroup }, /* 0x210 - 0x216 */
+    
+    /* --- 0x400 Series (System/Management) --- */
+    { 0x400,             Handle_SystemGroup   }, /* 0x400 - 0x40C */
+    
+    /* --- 0x500 Series (Sensor/Telemetry) --- */
+    { 0x500,             Handle_SensorGroup   }  /* 0x500 - 0x53F */
 };
 
 #define DISPATCH_COUNT (sizeof(can_dispatch_table) / sizeof(CAN_Dispatch_t))
@@ -473,7 +634,7 @@ const CAN_Dispatch_t can_dispatch_table[] = {
  */
 void StartCanRxTask(void const * argument) {
     osEvent event;
-    CAN_Msg_t *pRx;
+    // CAN_Msg_t *pRx;
     // char dbg[64]; /* Local stack message buffer */
     
     /* 1. Wait for the signal from StartDefaultTask */
@@ -496,45 +657,27 @@ void StartCanRxTask(void const * argument) {
         event = osMessageGet(canRxQueueHandle, osWaitForever);
 
         if (event.status == osEventMessage) {
-            pRx = (CAN_Msg_t*)event.value.p;
+            CAN_Msg_t *pRx = (CAN_Msg_t*)event.value.p;
+            uint32_t msgRemoteId = __REV(*(uint32_t*)&pRx->payload);
 
-            /* Extract the remote ID */
-            uint32_t msgRemoteId = __REV(*(uint32_t*)&pRx->payload); /* Reverse endianness */
-
-            /* Check if the message is for our Node ID */
             if (msgRemoteId == nodeInfo.nodeID) {
-                bool found = false;
-                
-                /* Search the table for a matching ID */
+                /* RANGE-BASED DISPATCH LOGIC */
                 for (int i = 0; i < DISPATCH_COUNT; i++) {
-                    if (pRx->canID == can_dispatch_table[i].msgID) {
-                        /* Execute the function pointed to in the table */
+                    /* If it's an exact match OR if it's the start of a range 
+                       (We assume anything from the table ID up to the next 
+                       16 IDs belongs to that group)
+                    */
+                    if (pRx->canID == can_dispatch_table[i].msgID || 
+                       (pRx->canID >= can_dispatch_table[i].msgID && pRx->canID < can_dispatch_table[i].msgID + 0x10)) 
+                    {
                         can_dispatch_table[i].handler(pRx);
-                        found = true;
                         break;
                     }
                 }
-
-                if (!found) {
-                    /* Optional: Log unhandled IDs */
-                    // snprintf(msg, sizeof(msg), "CAN RX: Unhandled ID: 0x%08lx\r\n", pRx->canID);
-                    // SecureDebug(msg);
-                }
             }
-
-            /* 4. ALWAYS free the pointer back to the pool */
             osPoolFree(canMsgPoolHandle, pRx);
         }
     }         
-        // case SW_SET_ON_ID:
-        //     HAL_GPIO_WritePin(LED_GREEN_GPIO_Port, LED_GREEN_Pin, GPIO_PIN_SET);
-        //     SecureDebug("CAN RX: Remote Load ON\r\n");
-        //     break;
-
-        // case SW_SET_OFF_ID:
-        //     HAL_GPIO_WritePin(LED_GREEN_GPIO_Port, LED_GREEN_Pin, GPIO_PIN_RESET);
-        //     SecureDebug("CAN RX: Remote Load OFF\r\n");
-        //     break;
 }
 
 /**
