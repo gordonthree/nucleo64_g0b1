@@ -544,11 +544,11 @@ void StartCanTxTask(void const * argument) {
                   }
                 } else {
                   int retry = 0;
-                  while (HAL_FDCAN_GetTxFifoFreeLevel(&hfdcan1) == 0 && retry < 3) {
-                      osDelay(5); /* Give the hardware 5ms to clear a mailbox */
+                  while (HAL_FDCAN_GetTxFifoFreeLevel(&hfdcan1) == 0 && retry < 5) {
+                      osDelay(2); /* Give the hardware 5ms to clear a mailbox */
                       retry++; 
                   }
-                  if (retry >= 3) SecureDebug("CAN Mailbox Full\r\n");
+                  if (retry >= 5) SecureDebug("CAN Mailbox Full\r\n");
                 }
 
                 /* 4. IMPORTANT: Free the memory back to the pool so it can be reused */
