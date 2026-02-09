@@ -94,11 +94,11 @@ void MX_FREERTOS_Init(void) {
   defaultTaskHandle = osThreadCreate(osThread(defaultTask), NULL);
 
   /* definition and creation of canRxTask */
-  osThreadDef(canRxTask, StartCanRxTask, osPriorityHigh, 0, 256);
+  osThreadDef(canRxTask, StartCanRxTask, osPriorityHigh, 0, 512);
   canRxTaskHandle = osThreadCreate(osThread(canRxTask), NULL);
 
   /* definition and creation of canTxTask */
-  osThreadDef(canTxTask, StartCanTxTask, osPriorityNormal, 0, 256);
+  osThreadDef(canTxTask, StartCanTxTask, osPriorityNormal, 0, 512);
   canTxTaskHandle = osThreadCreate(osThread(canTxTask), NULL);
 }
 
@@ -317,10 +317,14 @@ static void txIntroduction(void) {
 void StartDefaultTask(void const * argument)
 {
     /* USER CODE BEGIN StartDefaultTask */
-    static char msg[512] __attribute__((aligned(8))); /* Buffer to hold message strings */
+    static char msg[DEBUG_MSG_SIZE] __attribute__((aligned(8))); /* Buffer to hold message strings */
     uint32_t tickCounter = 0;
     introMsgPtr = 0; /* Reset the pointer */
-  
+ 
+    /* Start the CAN tasks */
+    if (canRxTaskHandle != NULL) xTaskNotifyGive(canRxTaskHandle);
+    if (canTxTaskHandle != NULL) xTaskNotifyGive(canTxTaskHandle);
+
     /* Initialize nodeInfo */
     nodeInfo.nodeID = board_crc; 
     nodeInfo.nodeTypeMsg = BOX_MULTI_IO_ID;
@@ -328,12 +332,10 @@ void StartDefaultTask(void const * argument)
 
     nodeInfo.subModules[0].modType = INPUT_ANALOG_KNOB_ID;
     nodeInfo.subModules[0].dataMsgId = DATA_ANALOG_KNOB_MV_ID;
-    // nodeInfo.subModules[0].dataSize = 2; // 2 bytes
     nodeInfo.subModules[0].sendFeatureMask = false;
 
     nodeInfo.subModules[1].modType = NODE_CPU_TEMP_ID;
     nodeInfo.subModules[1].dataMsgId = DATA_NODE_CPU_TEMP_ID;
-    // nodeInfo.subModules[1].dataSize = 2; // 2 bytes
     nodeInfo.subModules[1].sendFeatureMask = false;
 
     /* Use the last few bits of your unique ID to create a 'random' startup delay */
@@ -352,9 +354,7 @@ void StartDefaultTask(void const * argument)
 
 
   
-    /* 3. Start the CAN tasks */
-    if (canRxTaskHandle != NULL) xTaskNotifyGive(canRxTaskHandle);
-    if (canTxTaskHandle != NULL) xTaskNotifyGive(canTxTaskHandle);
+
         
     /* Set flag to send the introduction*/
     FLAG_SEND_INTRODUCTION = true; 
