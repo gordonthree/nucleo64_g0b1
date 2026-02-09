@@ -1,3 +1,5 @@
+/* app_freertos.c */
+
 /* Includes ------------------------------------------------------------------*/
 #include <stdio.h>   // For sprintf and snprintf
 #include <stdlib.h>  // For abs
@@ -7,8 +9,6 @@
 #include "FreeRTOS.h"
 #include "main.h"
 
-/* Local definitions ---------------------------------------------------------*/
-// #define TASK_STACK_SIZE 1024
 
 /* Private variables ---------------------------------------------------------*/
 uint8_t introMsgPtr; /**< pointer for intro messages */
@@ -36,34 +36,23 @@ osThreadId defaultTaskHandle;
 osThreadId canTxTaskHandle;
 osThreadId canRxTaskHandle;
 
-/* Pole for CAN messages 16 blocks of type CAN_Msg_t */
+/* Define the message pool: 16 blocks of type CAN_Msg_t */
 osPoolId canMsgPoolHandle;
-osPoolDef(canMsgPool, CAN_TX_QUEUE_LEN, CAN_Msg_t); 
-
-/* Pool for the debug message strings */
-osPoolId debugPoolHandle;
-osPoolDef(debugPool, DEBUG_QUEUE_LEN, DEBUG_MSG_SIZE); 
+osPoolDef(canMsgPool, 16, CAN_Msg_t); 
 
 /* Define the TX pointer queue: 16 slots, each holding a POINTER (uint32_t) */
 osMessageQId canTxQueueHandle;
-osMessageQDef(canTxQueue, CAN_TX_QUEUE_LEN, uint32_t);
+osMessageQDef(canTxQueue, 16, uint32_t);
 
 /* Define the RX pointer queue: 16 slots, each holding a POINTER (uint32_t) */
 osMessageQId canRxQueueHandle;
-osMessageQDef(canRxQueue, CAN_RX_QUEUE_LEN, uint32_t);
-
-/* Define a queue for debug message pointers */
-osMessageQId debugQueueHandle;
-osMessageQDef(debugQueue, DEBUG_QUEUE_LEN, uint32_t); /* Queue of 16 string pointers */
-
+osMessageQDef(canRxQueue, 16, uint32_t);
 
 /* Global function prototypes -----------------------------------------------*/
 
 void StartDefaultTask(void const * argument);
 void StartCanRxTask(void const * argument);
 void StartCanTxTask(void const * argument);
-
-void SecureDebug(const char* buffer);
 
 void MX_FREERTOS_Init(void); /* (MISRA C 2004 rule 8.1) */
 
@@ -72,9 +61,10 @@ void MX_FREERTOS_Init(void); /* (MISRA C 2004 rule 8.1) */
 static void txIntroduction(void); /**< Function to send data about this node to the can bus */
 static void txSensorData(void); /**< Function to send sensor data to the can bus */
 static float internalTempFloat(uint32_t adc_val);
+static void SecureDebug(const char* buffer);
 
+/* Dispatch table configuration */
 typedef void (*CAN_Handler_t)(CAN_Msg_t *pMsg);
-
 
 /**
   * @brief  FreeRTOS initialization
@@ -91,62 +81,34 @@ void MX_FREERTOS_Init(void) {
   /* BEGIN RTOS_MUTEX */
   uartMutexHandle = osMutexCreate(osMutex(uartMutex));
 
-  /* Create Memory Pool for CAN messages */
+  /* Create the Memory Pool */
   canMsgPoolHandle = osPoolCreate(osPool(canMsgPool));
 
-  /* Create Memory Pool for debug messages */
-  debugPoolHandle = osPoolCreate(osPool(debugPool));
-
-  /* Initialize the Message Queues */
+  /* Create the Message Queue */
   canTxQueueHandle = osMessageCreate(osMessageQ(canTxQueue), NULL);
   canRxQueueHandle = osMessageCreate(osMessageQ(canRxQueue), NULL);
-  debugQueueHandle = osMessageCreate(osMessageQ(debugQueue), NULL);
-
   /* END RTOS_MUTEX */
 
+  /* Create the thread(s) */
+  osThreadDef(defaultTask, StartDefaultTask, osPriorityNormal, 0, 512);
+  defaultTaskHandle = osThreadCreate(osThread(defaultTask), NULL);
+
   /* definition and creation of canRxTask */
-  osThreadDef(canRxTask, StartCanRxTask, osPriorityHigh, 0, 2048);
+  osThreadDef(canRxTask, StartCanRxTask, osPriorityHigh, 0, 256);
   canRxTaskHandle = osThreadCreate(osThread(canRxTask), NULL);
 
   /* definition and creation of canTxTask */
-  osThreadDef(canTxTask, StartCanTxTask, osPriorityNormal, 0, 1024);
+  osThreadDef(canTxTask, StartCanTxTask, osPriorityNormal, 0, 256);
   canTxTaskHandle = osThreadCreate(osThread(canTxTask), NULL);
-
-  /* definition and creation of defaultTask */
-  osThreadDef(defaultTask, StartDefaultTask, osPriorityNormal, 0, 1024);
-  defaultTaskHandle = osThreadCreate(osThread(defaultTask), NULL);
-
-
-/**
- * @brief  Securely send a string to the debug UART.
- * @param   str  string to send (null terminated)
- * @details This function allocates memory from the debug pool, copies the string to the allocated buffer, and then sends the pointer to the debug queue.
- *          If the queue or pool aren't ready yet, don't crash. If the queue is full, we free it immediately so we don't leak memory.
- */
-void SecureDebug(const char* str) {
-    /* Safety Check: If the queue or pool aren't ready yet, don't crash */
-    if (debugQueueHandle == NULL || debugPoolHandle == NULL) {
-        /* Optional: Fallback to a blocking HAL_UART_Transmit if you really need the early logs */
-        return; 
-    }
-    
-    /* 1. Allocate a buffer from the pool */
-    char* pMsg = (char*)osPoolCAlloc(debugPoolHandle); /* Non blocking, returns NULL if full */
-    int msgSize = (DEBUG_MSG_SIZE - 1); /* subtract one for null termination */
-
-    if (pMsg != NULL) {
-        /* 2. Copy the string (safely) */
-        strncpy(pMsg, str, DEBUG_MSG_SIZE);
-        pMsg[msgSize] = '\0'; /* Ensure null termination */
-        
-        /* 3. Send the pointer to the queue. 
-           If the queue is full, we free it immediately so we don't leak memory. */
-        if (osMessagePut(debugQueueHandle, (uint32_t)pMsg, 0) != osOK) {
-            osPoolFree(debugPoolHandle, pMsg);
-        }
-    }
 }
 
+static void SecureDebug(const char* buffer) {
+    // Note: use the handle directly or your getter
+    if (osMutexWait(uartMutexHandle, osWaitForever) == osOK) {
+        HAL_UART_Transmit(&huart2, (uint8_t*)buffer, strlen(buffer), 100);
+        osMutexRelease(uartMutexHandle);
+    }
+}
 void Handle_DataEpoch(CAN_Msg_t *pMsg) {
     uint32_t rxTimeRev;
     
@@ -188,8 +150,6 @@ void Handle_AckIntro(CAN_Msg_t *pMsg) {
         }
     }
 }
-
-
 /**
  * @brief Calculate the internal CPU temperature using factory calibration.
  * @param adc_val The raw 12-bit ADC reading from the temp sensor channel.
@@ -234,7 +194,7 @@ static float internalTempFloat(uint32_t adc_val) {
 static void txSensorData(void) {
     /* Loop through sub-modules to send current readings */
     for (int i = 0; i < nodeInfo.subModCnt; i++) {
-        CAN_Msg_t *pNew = (CAN_Msg_t*)osPoolCAlloc(canMsgPoolHandle);
+        CAN_Msg_t *pNew = (CAN_Msg_t*)osPoolAlloc(canMsgPoolHandle);
         if (pNew == NULL) return;
 
         pNew->canID = nodeInfo.subModules[i].dataMsgId; /**< Set CAN MSG ID */
@@ -269,7 +229,6 @@ static void txIntroduction(void) {
 
     /* Cooldown to prevent spamming the bus every 100ms tick */
     static uint32_t lastSendTick = 0;
-    // static char msg[DEBUG_MSG_SIZE] __attribute__((aligned(8)));
     uint32_t currentTick = osKernelSysTick();
     
     if (currentTick - lastSendTick < 500) {
@@ -277,9 +236,10 @@ static void txIntroduction(void) {
     }
     lastSendTick = currentTick;
 
-    CAN_Msg_t *pNew = (CAN_Msg_t*)osPoolCAlloc(canMsgPoolHandle); /* Allocate from Pool (Non-blocking) */
+    static char msg[512] __attribute__((aligned(8)));
+    CAN_Msg_t *pNew = (CAN_Msg_t*)osPoolAlloc(canMsgPoolHandle); /* Allocate from Pool (Non-blocking) */
     if (pNew == NULL) {
-    //   SecureDebug(("INTRO: CAN msg pool full\r\n"));
+      SecureDebug(("TX INTRO: Pool Error\r\n"));
       return;
     }
     uint16_t txMsgID = 0;
@@ -292,9 +252,9 @@ static void txIntroduction(void) {
             osPoolFree(canMsgPoolHandle, pNew); /* Release unused pool block */
             return;
         }
-        // snprintf(msg, sizeof(msg), "INTRO: NODE INTRO Type %03x\r\n", txMsgID);
-        // SecureDebug(msg);
-        SecureDebug("INTRO: Sending node identification\r\n");
+        snprintf(msg, sizeof(msg), "TX INTRO: NODE INTRO Type %03x\r\n", txMsgID);
+        SecureDebug(msg);
+        // SecureDebug("TX: NODE INTRO Type %03x\r\n", txMsgID);
         
         // Send the feature mask
         payload[0] = nodeInfo.featureMask[0]; 
@@ -304,24 +264,21 @@ static void txIntroduction(void) {
     else {
         uint8_t modIdx = (uint8_t)(introMsgPtr - 1); // Sub-modules start at ptr 1
         
-        /* if index is beyond the range of defined modules, return to sender */
-        if (modIdx > nodeInfo.subModCnt) {
+        if (modIdx >= nodeInfo.subModCnt) {
             osPoolFree(canMsgPoolHandle, pNew); /* Release unused pool block */
             return;
         }
 
-        /* Retrieve module type aka can message ID */
-        txMsgID = nodeInfo.subModules[modIdx].modType; 
+        txMsgID = nodeInfo.subModules[modIdx].modType; // Retrieve module type aka can message ID
         
-        /* if module type is not defined, return to sender */
         if (txMsgID == 0) {
             osPoolFree(canMsgPoolHandle, pNew); /* Release unused pool block */
             introMsgPtr++; /* Error condition, skip empty slot and move to next */
             return;
         }
-        // snprintf(msg, sizeof(msg), "TX INTRO: MOD INTRO Type %03x at Idx %i\r\n", txMsgID, modIdx);
-        // SecureDebug(msg);
-        SecureDebug("INTRO: Sending sub-module identification\r\n");
+        snprintf(msg, sizeof(msg), "TX INTRO: MOD INTRO Type %03x at Idx %i\r\n", txMsgID, modIdx);
+        SecureDebug(msg);
+        // SecureDebug("TX: MOD INTRO Type %03x at Idx %i\r\n", txMsgID, modIdx);
         
         if (nodeInfo.subModules[modIdx].sendFeatureMask) {
             // Send the feature mask
@@ -369,39 +326,45 @@ static void txIntroduction(void) {
 void StartDefaultTask(void const * argument)
 {
     /* USER CODE BEGIN StartDefaultTask */
-    static char msg[DEBUG_MSG_SIZE] __attribute__((aligned(8))); /* Buffer to hold message strings */
+    static char msg[512] __attribute__((aligned(8))); /* Buffer to hold message strings */
     uint32_t tickCounter = 0;
     introMsgPtr = 0; /* Reset the pointer */
   
-    /* Start the CAN tasks */
-    if (canRxTaskHandle != NULL) xTaskNotifyGive(canRxTaskHandle);
-    if (canTxTaskHandle != NULL) xTaskNotifyGive(canTxTaskHandle);
-
-    /* Initialize nodeInfo with some static values */
+    /* Initialize nodeInfo */
     nodeInfo.nodeID = board_crc; 
     nodeInfo.nodeTypeMsg = BOX_MULTI_IO_ID;
     nodeInfo.subModCnt = 2;
 
     nodeInfo.subModules[0].modType = INPUT_ANALOG_KNOB_ID;
     nodeInfo.subModules[0].dataMsgId = DATA_ANALOG_KNOB_MV_ID;
+    // nodeInfo.subModules[0].dataSize = 2; // 2 bytes
     nodeInfo.subModules[0].sendFeatureMask = false;
 
     nodeInfo.subModules[1].modType = NODE_CPU_TEMP_ID;
     nodeInfo.subModules[1].dataMsgId = DATA_NODE_CPU_TEMP_ID;
+    // nodeInfo.subModules[1].dataSize = 2; // 2 bytes
     nodeInfo.subModules[1].sendFeatureMask = false;
 
-    /* Use the last few bits of your unique ID to create a 'random' startup delay */
+    osDelay(2000);
+
+    snprintf(msg, sizeof(msg), 
+          "\r\n\r\n"
+          "-----------------------\r\n"
+          "--- DEVICE IDENTITY ---\r\n"
+          "--NODE ID: 0x%08lX--\r\n"
+          "-----------------------\r\n\r\n", 
+          (uint32_t)nodeInfo.nodeID);
+          
+    SecureDebug(msg); // Print to UART2
+
+    /* Use the last few bits of your unique ID to create a 0-500ms startup delay */
     uint32_t jitter = (nodeInfo.nodeID & 0x1FF); 
-    osDelay((2000 + jitter));
-
-    snprintf(msg, sizeof(msg), "\r\n\r\nNODE ID: 0x%08lX\r\n", (uint32_t)nodeInfo.nodeID);
-    // SecureDebug(msg); 
-
-    /* Standard FreeRTOS function to check remaining heap */
-    size_t freeHeap = xPortGetFreeHeapSize();
-    snprintf(msg, sizeof(msg), "Free Heap: %u bytes\r\n", (unsigned int)freeHeap);
-    SecureDebug(msg);
-    
+    osDelay(jitter);
+  
+    /* 3. Start the CAN tasks */
+    if (canRxTaskHandle != NULL) xTaskNotifyGive(canRxTaskHandle);
+    if (canTxTaskHandle != NULL) xTaskNotifyGive(canTxTaskHandle);
+        
     /* Set flag to send the introduction*/
     FLAG_SEND_INTRODUCTION = true; 
 
@@ -427,30 +390,7 @@ void StartDefaultTask(void const * argument)
                 txSensorData();
             }
         }
-        else if (FLAG_SET_RTC_TIME) {
-             /* Code to set the RTC time goes here */
-        
-        }
-
-        /* Check to see if there's a message in the queue */
-        osEvent event = osMessageGet(debugQueueHandle, 0);
-        
-        if (event.status == osEventMessage) {
-            char* pStr = (char*)event.value.p;
-            
-            /* Grab the mutex before touching the UART hardware */
-            osMutexWait(uartMutexHandle, 10);
-            
-            /* Send to UART */
-            HAL_UART_Transmit(&huart2, (uint8_t*)pStr, strlen(pStr), 100);
-            
-            osMutexRelease(uartMutexHandle);
-            
-            /* IMPORTANT: Free the memory back to the pool! */
-            osPoolFree(debugPoolHandle, pStr);
-        }
     
-        
         /* --- SECTION B: LOW PRIORITY UI/HEARTBEAT LOGIC --- */
         /* Toggle LED every 10 ticks (1000ms) */
         if (tickCounter % 10 == 0) {
@@ -470,22 +410,6 @@ void StartDefaultTask(void const * argument)
 }
 
 
-/* Dispatch table configuration */
-typedef struct {
-    uint16_t msgID;
-    CAN_Handler_t handler;
-} CAN_Dispatch_t;
-
-/* The actual table - make it 'const' to save RAM and put it in Flash */
-const CAN_Dispatch_t can_dispatch_table[] = {
-    { REQ_NODE_INTRO_ID, Handle_ReqNodeIntro },  /* 0x401 */
-    { ACK_INTRO_ID,      Handle_AckIntro      }, /* 0x400 */
-    { DATA_EPOCH_ID,     Handle_DataEpoch     }, /* 0x40C */
-};
-
-#define DISPATCH_COUNT (sizeof(can_dispatch_table) / sizeof(CAN_Dispatch_t))
-
-
 /**
  * @brief Function implementing the canRxTask thread.
  * @details This function continuously waits for message pointers from the ISR
@@ -497,9 +421,7 @@ const CAN_Dispatch_t can_dispatch_table[] = {
 void StartCanRxTask(void const * argument) {
     osEvent event;
     CAN_Msg_t *pRx;
-    
-    /* Buffer to hold message strings */
-    static char msg[DEBUG_MSG_SIZE] __attribute__((aligned(8))); 
+    // char dbg[64]; /* Local stack message buffer */
     
     /* 1. Wait for the signal from StartDefaultTask */
     ulTaskNotifyTake(pdTRUE, portMAX_DELAY); 
@@ -517,50 +439,55 @@ void StartCanRxTask(void const * argument) {
     }
 
     for(;;) {
-        /* Fetch the message from the queue */
-        osEvent event = osMessageGet(canRxQueueHandle, osWaitForever);
+        /* 1. Wait for a message pointer from the ISR */
+        event = osMessageGet(canRxQueueHandle, osWaitForever);
 
-        /* Take action when a message is received */
         if (event.status == osEventMessage) {
-            /* Copy message data to a local variable */
             pRx = (CAN_Msg_t*)event.value.p;
 
-            /* Extract the remote ID */
-            uint32_t msgRemoteId = __REV(*(uint32_t*)&pRx->payload);
+            /* 2. Extract Remote ID using little-endian pointer cast */
+            // uint32_t msgRemoteId = *(uint32_t*)&pRx->payload;
+            uint32_t msgRemoteId = __REV(*(uint32_t*)&pRx->payload); /* Reverse endianness */
 
-            /* Check if the message is for our Node ID */
+            /* 3. Logic: Is this intended for us? */
             if (msgRemoteId == nodeInfo.nodeID) {
-                bool found = false;
                 
-                /* Search the table for a matching ID */
-                for (int i = 0; i < DISPATCH_COUNT; i++) {
-                    if (pRx->canID == can_dispatch_table[i].msgID) {
-                        /* Execute the function pointed to in the table */
-                        can_dispatch_table[i].handler(pRx);
-                        found = true;
+                switch (pRx->canID) {
+                    case REQ_NODE_INTRO_ID:
+                        FLAG_BEGIN_NORMAL_OPER = false; 
+                        FLAG_SEND_INTRODUCTION = true;
+                        SecureDebug("CAN RX: Master Requested Intro\r\n");
                         break;
-                    }
-                }
 
-                if (!found) {
-                    /* Optional: Log unhandled IDs */
-                    // snprintf(msg, sizeof(msg), "CAN RX: Unhandled ID: 0x%08lx\r\n", pRx->canID);
-                    // SecureDebug(msg);
+                    case ACK_INTRO_ID:
+                        /* Only increment if we are actually in the intro phase */
+                        if (FLAG_SEND_INTRODUCTION) {
+                            introMsgPtr++; 
+                            
+                            if (introMsgPtr > nodeInfo.subModCnt) {
+                                FLAG_SEND_INTRODUCTION = false;
+                                FLAG_BEGIN_NORMAL_OPER = true;
+                                SecureDebug("CAN RX: Intro Sequence Complete\r\n");
+                            }
+                        }
+                        break;
+
+                    case SW_SET_ON_ID:
+                        HAL_GPIO_WritePin(LED_GREEN_GPIO_Port, LED_GREEN_Pin, GPIO_PIN_SET);
+                        SecureDebug("CAN RX: Remote Load ON\r\n");
+                        break;
+
+                    case SW_SET_OFF_ID:
+                        HAL_GPIO_WritePin(LED_GREEN_GPIO_Port, LED_GREEN_Pin, GPIO_PIN_RESET);
+                        SecureDebug("CAN RX: Remote Load OFF\r\n");
+                        break;
                 }
             }
+
+            /* 4. ALWAYS free the pointer back to the pool */
             osPoolFree(canMsgPoolHandle, pRx);
         }
-
     }
-        // case SW_SET_ON_ID:
-        //     HAL_GPIO_WritePin(LED_GREEN_GPIO_Port, LED_GREEN_Pin, GPIO_PIN_SET);
-        //     SecureDebug("CAN RX: Remote Load ON\r\n");
-        //     break;
-
-        // case SW_SET_OFF_ID:
-        //     HAL_GPIO_WritePin(LED_GREEN_GPIO_Port, LED_GREEN_Pin, GPIO_PIN_RESET);
-        //     SecureDebug("CAN RX: Remote Load OFF\r\n");
-        //     break;
 }
 
 /**
@@ -579,9 +506,6 @@ void StartCanTxTask(void const * argument) {
     /* Wait for the signal from StartDefaultTask */
     ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
 
-    /* Use raw UART for this one message to avoid the pool logic */
-    HAL_UART_Transmit(&huart2, (uint8_t*)"TX TASK LIVE\r\n", 14, 100);
-
     /* Initialize static header fields */
     txHeader.IdType = FDCAN_STANDARD_ID;
     txHeader.TxFrameType = FDCAN_DATA_FRAME;
@@ -591,28 +515,65 @@ void StartCanTxTask(void const * argument) {
     txHeader.FDFormat = FDCAN_CLASSIC_CAN;
 
     for(;;) {
-        /* Wait for a pointer to arrive in the queue */
+        /* 1. Wait for a pointer to arrive in the queue */
         event = osMessageGet(canTxQueueHandle, osWaitForever);
 
         if (event.status == osEventMessage) {
+            /* 2. Retrieve the pointer to the CAN_Msg_t in the pool */
             pMsg = (CAN_Msg_t*)event.value.p;
+
             if (pMsg != NULL) {
-                /* Try to send, but wait a moment if the hardware mailbox is full */
-                int retry = 0;
-                while (HAL_FDCAN_GetTxFifoFreeLevel(&hfdcan1) == 0 && retry < 5) {
-                    osDelay(2); /* Wait for hardware space */
-                    retry++;
+                txHeader.Identifier = pMsg->canID;
+
+                /* 3. Check for hardware space and transmit */
+                if (HAL_FDCAN_GetTxFifoFreeLevel(&hfdcan1) > 0) {
+                  if (HAL_FDCAN_AddMessageToTxFifoQ(&hfdcan1, &txHeader, (uint8_t*)&pMsg->payload) != HAL_OK) {
+                      SecureDebug("CAN HW Error\r\n");
+                  }
+                } else {
+                  int retry = 0;
+                  while (HAL_FDCAN_GetTxFifoFreeLevel(&hfdcan1) == 0 && retry < 3) {
+                      osDelay(5); /* Give the hardware 5ms to clear a mailbox */
+                      retry++; 
+                  }
+                  if (retry >= 3) SecureDebug("CAN Mailbox Full\r\n");
                 }
 
-                if (HAL_FDCAN_GetTxFifoFreeLevel(&hfdcan1) > 0) {
-                    txHeader.Identifier = pMsg->canID;
-                    HAL_FDCAN_AddMessageToTxFifoQ(&hfdcan1, &txHeader, (uint8_t*)&pMsg->payload);
-                }
-                
-                /* CRITICAL: Free the pool block no matter what */
+                /* 4. IMPORTANT: Free the memory back to the pool so it can be reused */
                 osPoolFree(canMsgPoolHandle, pMsg);
+            }
+
+                        /* Define a structure to hold the protocol status */
+            FDCAN_ProtocolStatusTypeDef protocolStatus;
+            
+            /* Get the current status from the hardware */
+            HAL_FDCAN_GetProtocolStatus(&hfdcan1, &protocolStatus);
+
+            /* 0=No Error, 1=Stuff, 2=Form, 3=Ack, 4=Bit1, 5=Bit0, 6=CRC */
+            uint8_t lec = protocolStatus.LastErrorCode; 
+            if (lec == 3) {
+                SecureDebug("CAN: No ACK detected - check wiring!\r\n");
+            }
+
+            /* Check specifically for Bus-Off */
+            if (protocolStatus.BusOff) {
+                SecureDebug("CAN: Bus-Off detected! Attempting recovery...\r\n");
+                
+                /* 1. Stop the peripheral */
+                HAL_FDCAN_Stop(&hfdcan1);
+                
+                /* 2. Wait a bit for the bus to stabilize */
+                osDelay(100); 
+                
+                /* 3. Restart the peripheral */
+                if (HAL_FDCAN_Start(&hfdcan1) == HAL_OK) {
+                    /* 4. Re-enable notifications */
+                    HAL_FDCAN_ActivateNotification(&hfdcan1, FDCAN_IT_RX_FIFO0_NEW_MESSAGE, 0);
+                    SecureDebug("CAN: Recovery successful.\r\n");
+                } else {
+                    SecureDebug("CAN: Recovery failed.\r\n");
+                }
             }
         }
     }
 }
-
