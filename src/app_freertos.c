@@ -345,7 +345,9 @@ void StartDefaultTask(void const * argument)
     // nodeInfo.subModules[1].dataSize = 2; // 2 bytes
     nodeInfo.subModules[1].sendFeatureMask = false;
 
-    osDelay(2000);
+    /* Use the last few bits of your unique ID to create a 'random' startup delay */
+    uint32_t jitter = (nodeInfo.nodeID & 0x1FF); 
+    osDelay((2000 + jitter));
 
     snprintf(msg, sizeof(msg), 
           "\r\n\r\n"
@@ -357,9 +359,7 @@ void StartDefaultTask(void const * argument)
           
     SecureDebug(msg); // Print to UART2
 
-    /* Use the last few bits of your unique ID to create a 0-500ms startup delay */
-    uint32_t jitter = (nodeInfo.nodeID & 0x1FF); 
-    osDelay(jitter);
+
   
     /* 3. Start the CAN tasks */
     if (canRxTaskHandle != NULL) xTaskNotifyGive(canRxTaskHandle);
@@ -389,6 +389,10 @@ void StartDefaultTask(void const * argument)
             if (tickCounter % 10 == 0) {
                 txSensorData();
             }
+        }         
+        else if (FLAG_SET_RTC_TIME) {
+             /* Code to set the RTC time goes here */
+        
         }
     
         /* --- SECTION B: LOW PRIORITY UI/HEARTBEAT LOGIC --- */
@@ -408,6 +412,20 @@ void StartDefaultTask(void const * argument)
     }
   /* END StartDefaultTask */
 }
+/* Dispatch table configuration */
+typedef struct {
+    uint16_t msgID;
+    CAN_Handler_t handler;
+} CAN_Dispatch_t;
+
+/* The actual table - make it 'const' to save RAM and put it in Flash */
+const CAN_Dispatch_t can_dispatch_table[] = {
+    { REQ_NODE_INTRO_ID, Handle_ReqNodeIntro },  /* 0x401 */
+    { ACK_INTRO_ID,      Handle_AckIntro      }, /* 0x400 */
+    { DATA_EPOCH_ID,     Handle_DataEpoch     }, /* 0x40C */
+};
+
+#define DISPATCH_COUNT (sizeof(can_dispatch_table) / sizeof(CAN_Dispatch_t))
 
 
 /**
