@@ -463,49 +463,43 @@ void StartCanRxTask(void const * argument) {
         if (event.status == osEventMessage) {
             pRx = (CAN_Msg_t*)event.value.p;
 
-            /* 2. Extract Remote ID using little-endian pointer cast */
-            // uint32_t msgRemoteId = *(uint32_t*)&pRx->payload;
+            /* Extract the remote ID */
             uint32_t msgRemoteId = __REV(*(uint32_t*)&pRx->payload); /* Reverse endianness */
 
-            /* 3. Logic: Is this intended for us? */
+            /* Check if the message is for our Node ID */
             if (msgRemoteId == nodeInfo.nodeID) {
+                bool found = false;
                 
-                switch (pRx->canID) {
-                    case REQ_NODE_INTRO_ID:
-                        FLAG_BEGIN_NORMAL_OPER = false; 
-                        FLAG_SEND_INTRODUCTION = true;
-                        SecureDebug("CAN RX: Master Requested Intro\r\n");
+                /* Search the table for a matching ID */
+                for (int i = 0; i < DISPATCH_COUNT; i++) {
+                    if (pRx->canID == can_dispatch_table[i].msgID) {
+                        /* Execute the function pointed to in the table */
+                        can_dispatch_table[i].handler(pRx);
+                        found = true;
                         break;
+                    }
+                }
 
-                    case ACK_INTRO_ID:
-                        /* Only increment if we are actually in the intro phase */
-                        if (FLAG_SEND_INTRODUCTION) {
-                            introMsgPtr++; 
-                            
-                            if (introMsgPtr > nodeInfo.subModCnt) {
-                                FLAG_SEND_INTRODUCTION = false;
-                                FLAG_BEGIN_NORMAL_OPER = true;
-                                SecureDebug("CAN RX: Intro Sequence Complete\r\n");
-                            }
-                        }
-                        break;
-
-                    case SW_SET_ON_ID:
-                        HAL_GPIO_WritePin(LED_GREEN_GPIO_Port, LED_GREEN_Pin, GPIO_PIN_SET);
-                        SecureDebug("CAN RX: Remote Load ON\r\n");
-                        break;
-
-                    case SW_SET_OFF_ID:
-                        HAL_GPIO_WritePin(LED_GREEN_GPIO_Port, LED_GREEN_Pin, GPIO_PIN_RESET);
-                        SecureDebug("CAN RX: Remote Load OFF\r\n");
-                        break;
+                if (!found) {
+                    /* Optional: Log unhandled IDs */
+                    // snprintf(msg, sizeof(msg), "CAN RX: Unhandled ID: 0x%08lx\r\n", pRx->canID);
+                    // SecureDebug(msg);
                 }
             }
 
             /* 4. ALWAYS free the pointer back to the pool */
             osPoolFree(canMsgPoolHandle, pRx);
         }
-    }
+    }         
+        // case SW_SET_ON_ID:
+        //     HAL_GPIO_WritePin(LED_GREEN_GPIO_Port, LED_GREEN_Pin, GPIO_PIN_SET);
+        //     SecureDebug("CAN RX: Remote Load ON\r\n");
+        //     break;
+
+        // case SW_SET_OFF_ID:
+        //     HAL_GPIO_WritePin(LED_GREEN_GPIO_Port, LED_GREEN_Pin, GPIO_PIN_RESET);
+        //     SecureDebug("CAN RX: Remote Load OFF\r\n");
+        //     break;
 }
 
 /**
