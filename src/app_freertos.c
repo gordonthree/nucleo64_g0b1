@@ -90,7 +90,7 @@ void MX_FREERTOS_Init(void) {
   /* END RTOS_MUTEX */
 
   /* Create the thread(s) */
-  osThreadDef(defaultTask, StartDefaultTask, osPriorityNormal, 0, 512);
+  osThreadDef(defaultTask, StartDefaultTask, osPriorityNormal, 0, 2048);
   defaultTaskHandle = osThreadCreate(osThread(defaultTask), NULL);
 
   /* definition and creation of canRxTask */
