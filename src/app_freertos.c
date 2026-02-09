@@ -161,7 +161,6 @@ static float internalTempFloat(uint32_t adc_val) {
     return temperature;
 }
 
-
 static void txSensorData(void) {
     /* Loop through sub-modules to send current readings */
     for (int i = 0; i < nodeInfo.subModCnt; i++) {
@@ -184,24 +183,26 @@ static void txSensorData(void) {
         *(uint32_t*)&pData[0] = __REV(nodeInfo.nodeID);
 
         /* Handle Float vs Integer based on Message ID */
-        if (nodeInfo.subModules[i].modType == DATA_NODE_CPU_TEMP_ID) {
-            // float temp = nodeInfo.subModules[i].data.fltValue;
-            float temp = (19.70f); // Hardcoded for testing
+        if (nodeInfo.subModules[i].modType == NODE_CPU_TEMP_ID) {
+            float temp = nodeInfo.subModules[i].data.fltValue;
+            /** Instead of casting to uint16_t, we copy the full 32-bit float 
+            * bit-pattern into bytes 4, 5, 6, and 7 of the payload.
+            */
             uint32_t raw_bits;
-            memcpy(&raw_bits, &temp, 4);
-
-            /** For DLC 7 messages, the 'sensor data' starts at Byte 4.
-             * If the sensor data is only 2 bytes (16-bit), we map it to 
-             * pData[4] and pData[5], leaving pData[6] and pData[7] as 0.
-             */
-            uint16_t out_val = (uint16_t)(raw_bits & 0xFFFF);
-            pData[4] = (uint8_t)((out_val >> 8) & 0xFF); /* MSB */
-            pData[5] = (uint8_t)(out_val & 0xFF);        /* LSB */
+            memcpy(&raw_bits, &temp, sizeof(float));
+            
+            /** We use __REV to maintain Big-Endian (Motorola) order so the 
+            * MSB of the float is at pData[4].
+            */
+            *(uint32_t*)&pData[4] = __REV(raw_bits);
+            
+            /* Update DLC to 8 to accommodate the full 4-byte float */
+            pNew->DLC = DATA_NODE_CPU_TEMP_DLC;
             
             /* Use the specific DLC defined in your constants (7U) */
-            pNew->DLC = DATA_NODE_CPU_TEMP_DLC; 
+            // pNew->DLC = DATA_NODE_CPU_TEMP_DLC; 
 
-        } else if (nodeInfo.subModules[i].modType == DATA_ANALOG_KNOB_MV_ID) {
+        } else if (nodeInfo.subModules[i].modType == INPUT_ANALOG_KNOB_ID) {
             /** DATA_ANALOG_KNOB_MV (0x518) uses DLC 7.
              * Mapping 16-bit i32Value to Big-Endian at offset 4.
              */
@@ -209,7 +210,7 @@ static void txSensorData(void) {
             pData[4] = (uint8_t)((knob_val >> 8) & 0xFF); /* MSB */
             pData[5] = (uint8_t)(knob_val & 0xFF);        /* LSB */
             
-            pNew->DLC = DATA_ANALOG_KNOB_MV_DLC; 
+            pNew->DLC = DATA_ANALOG_KNOB1_DLC; 
         }
 
         if (osMessagePut(canTxQueueHandle, (uint32_t)pNew, 0) != osOK) {
@@ -225,15 +226,15 @@ static void txIntroduction(void) {
     /* Cooldown to prevent spamming the bus every 100ms tick */
     static uint32_t lastSendTick = 0;
     uint32_t currentTick = osKernelSysTick();
-    uint8_t msgDLC = 8; /* Classic CAN always 8 bytes unless otherwise indicated */
+    uint32_t txMsgDLC = 8U; /* Default to 8 bytes */
     
     if (currentTick - lastSendTick < 500) {
         return; /* Wait at least 500ms before re-transmitting the same packet */
     }
     lastSendTick = currentTick;
 
-    static char msg[512] __attribute__((aligned(8)));
-    CAN_Msg_t *pNew = (CAN_Msg_t*)osPoolAlloc(canMsgPoolHandle); /* Allocate from Pool (Non-blocking) */
+    static char msg[DEBUG_MSG_SIZE] __attribute__((aligned(8)));
+    CAN_Msg_t *pNew = (CAN_Msg_t*)osPoolCAlloc(canMsgPoolHandle); /* Allocate a zeroed message buffer from Pool (Non-blocking) */
     if (pNew == NULL) {
       SecureDebug(("TX INTRO: Pool Error\r\n"));
       return;
@@ -244,7 +245,7 @@ static void txIntroduction(void) {
     // --- STEP 0: Introduce the Node itself ---
     if (introMsgPtr == 0) {
         txMsgID = nodeInfo.nodeTypeMsg; /* Retrieve node type aka can message ID */
-        msgDLC = nodeInfo.nodeTypeDLC; /* set DLC based on message type */
+        txMsgDLC = nodeInfo.nodeTypeDLC; /* set DLC based on message type */
         if (txMsgID == 0) {
             osPoolFree(canMsgPoolHandle, pNew); /* Release unused pool block */
             return;
@@ -277,7 +278,7 @@ static void txIntroduction(void) {
         SecureDebug(msg);
         // SecureDebug("TX: MOD INTRO Type %03x at Idx %i\r\n", txMsgID, modIdx);
         
-        if (nodeInfo.subModules[modIdx].sendFeatureMask) {
+        if (nodeInfo.subModules[modIdx].useFeatureMask) {
             // Send the feature mask
             payload[0] = nodeInfo.subModules[modIdx].featureMask[0];
             payload[1] = nodeInfo.subModules[modIdx].featureMask[1];
@@ -286,8 +287,7 @@ static void txIntroduction(void) {
 
     /* Assemble the final 8-byte CAN Frame */
     pNew->canID = txMsgID;
-
-    pNew->DLC = msgDLC;
+    pNew->DLC = txMsgDLC;
     /* Get a pointer to the start of the payload as a byte array */
     uint8_t *pData = (uint8_t*)&pNew->payload; 
 
@@ -302,8 +302,6 @@ static void txIntroduction(void) {
     /* Bytes 6-7: Padding */
     pData[6] = 0;
     pData[7] = 0;
-
-    pNew->DLC = 8;
 
     /* Push the POINTER to the queue */
     if (osMessagePut(canTxQueueHandle, (uint32_t)pNew, 0) != osOK) {
@@ -333,17 +331,20 @@ void StartDefaultTask(void const * argument)
     if (canTxTaskHandle != NULL) xTaskNotifyGive(canTxTaskHandle);
 
     /* Initialize nodeInfo */
-    nodeInfo.nodeID = board_crc; 
-    nodeInfo.nodeTypeMsg = BOX_MULTI_IO_ID;
+    nodeInfo.nodeID         = board_crc; 
+    nodeInfo.nodeTypeMsg    = BOX_MULTI_IO_ID;
+    nodeInfo.nodeTypeDLC    = 6U;
+    nodeInfo.featureMask[0] = (uint8_t)FEATURE_NODE_CPU_TEMP;
+    nodeInfo.featureMask[1] = (uint8_t)FEATURE_NODE_INT_VOLTAGE_SENSOR;
     nodeInfo.subModCnt = 2;
 
-    nodeInfo.subModules[0].modType = INPUT_ANALOG_KNOB_ID;
-    nodeInfo.subModules[0].dataMsgId = DATA_ANALOG_KNOB_MV_ID;
-    nodeInfo.subModules[0].sendFeatureMask = false;
+    nodeInfo.subModules[0].modType         = INPUT_ANALOG_KNOB_ID;
+    nodeInfo.subModules[0].dataMsgId       = DATA_ANALOG_KNOB1_ID;
+    nodeInfo.subModules[0].useFeatureMask  = false;
 
-    nodeInfo.subModules[1].modType = NODE_CPU_TEMP_ID;
-    nodeInfo.subModules[1].dataMsgId = DATA_NODE_CPU_TEMP_ID;
-    nodeInfo.subModules[1].sendFeatureMask = false;
+    nodeInfo.subModules[1].modType         = NODE_CPU_TEMP_ID;
+    nodeInfo.subModules[1].dataMsgId       = DATA_NODE_CPU_TEMP_ID;
+    nodeInfo.subModules[1].useFeatureMask  = false;
 
     /* Use the last few bits of your unique ID to create a 'random' startup delay */
     uint32_t jitter = (nodeInfo.nodeID & 0x1FF); 
@@ -611,24 +612,24 @@ static void Handle_SensorGroup(CAN_Msg_t *pMsg) {
         case DATA_DIAL_CLOCKWISE_ID:    SecureDebug("DATA: Dial clockwise\r\n"); break; /* 0x504 */
         case DATA_DIAL_COUNTER_CLOCKWISE_ID: SecureDebug("DATA: Dial counter clockwise\r\n"); break; /* 0x505 */
         case DATA_DIAL_CLICK_ID:        SecureDebug("DATA: Dial click\r\n"); break; /* 0x506 */
-        case DATA_RFID_READ_ID:         SecureDebug("DATA: RFID read\r\n"); break; /* 0x507 */
         case DATA_CONTACT_CLOSED_ID:    SecureDebug("DATA: Contact closed\r\n"); break; /* 0x508 */
         case DATA_CONTACT_OPENED_ID:    SecureDebug("DATA: Contact opened\r\n"); break; /* 0x509 */ 
-        case DATA_ANALOG_KNOB_MV_ID: SecureDebug("DATA: Analog knob mv\r\n"); break; /* 0x518 */
+        case DATA_ANALOG_KNOB1_ID:      SecureDebug("DATA: Analog knob 1\r\n"); break; /* 0x518 */
+        case DATA_ANALOG_KNOB2_ID:      SecureDebug("DATA: Analog knob 2\r\n"); break; /* 0x519 */
+        case DATA_ANALOG_KNOB3_ID:      SecureDebug("DATA: Analog knob 3\r\n"); break; /* 0x51D */
+        case DATA_ANALOG_KNOB4_ID:      SecureDebug("DATA: Analog knob 4\r\n"); break; /* 0x51E */
         case DATA_AMBIENT_LIGHT_USE_PRIV_MSG_ID: SecureDebug("DATA: Ambient light USE PRIV MSG\r\n"); break; /* 0x510 */
-        case DATA_OUTPUT_SWITCH_MOM_PUSH_ID: SecureDebug("DATA: Output switch mom push\r\n"); break; /* 0x519 */
-        case DATA_OUTPUT_SWITCH_STATE_ID: SecureDebug("DATA: Output switch state\r\n"); break; /* 0x51D */
 
 
         /* Temperature, voltage and current Data */
-        case DATA_INTERNAL_TEMPERATURE_ID: SecureDebug("DATA: Internal temperature\r\n"); break; /* 0x50A */
+        case DATA_INTERNAL_PCB_TEMP_ID: SecureDebug("DATA: Internal pcb temperature\r\n"); break; /* 0x50A */
         case DATA_INTERNAL_PCB_VOLTS_ID: SecureDebug("DATA: Internal pcb volts\r\n"); break; /* 0x50B */
         case DATA_INTERNAL_PCB_CURRENT_ID: SecureDebug("DATA: Internal pcb current\r\n"); break; /* 0x50C */
-        case DATA_EXTERNAL_TEMPERATURE_ID: SecureDebug("DATA: External temperature\r\n"); break; /* 0x50D */
-        case DATA_EXTERNAL_VOLTS_ID: SecureDebug("DATA: External volts\r\n"); break; /* 0x50E */
-        case DATA_EXTERNAL_CURRENT_ID: SecureDebug("DATA: External current\r\n"); break; /* 0x50F */
+        case DATA_EXTERNAL_TEMPERATURE1_ID: SecureDebug("DATA: External temperature 1\r\n"); break; /* 0x50D */
+        case DATA_EXTERNAL_TEMPERATURE2_ID: SecureDebug("DATA: External temperature 2\r\n"); break; /* 0x526 */
+        case DATA_EXTERNAL_TEMPERATURE3_ID: SecureDebug("DATA: External temperature 3\r\n"); break; /* 0x527 */
+        case DATA_EXTERNAL_TEMPERATURE4_ID: SecureDebug("DATA: External temperature 4\r\n"); break; /* 0x528 */
         case DATA_NODE_CPU_TEMP_ID: SecureDebug("DATA: Node CPU temp\r\n"); break; /* 0x51A */
-        case DATA_NODE_PCB_TEMP_ID: SecureDebug("DATA: Node PCB temp\r\n"); break; /* 0x51C */
 
         
         /* IMU Data */
