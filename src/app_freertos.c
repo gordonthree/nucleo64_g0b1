@@ -72,7 +72,7 @@ static void Handle_SwitchGroup(CAN_Msg_t *pMsg);
 static void Handle_DisplayGroup(CAN_Msg_t *pMsg);
 
 static void txHeartbeatEpoch(void);
-
+static uint32_t ConvertToFdcanDlc(uint8_t dlc);
 
 /* Dispatch table configuration */
 typedef void (*CAN_Handler_t)(CAN_Msg_t *pMsg);
@@ -168,27 +168,48 @@ static void txSensorData(void) {
         CAN_Msg_t *pNew = (CAN_Msg_t*)osPoolAlloc(canMsgPoolHandle);
         if (pNew == NULL) return;
 
+        /* Initialize buffer to 0 to ensure trailing bytes are clean */
+        memset(&pNew->payload, 0, 8);
+
         pNew->canID = nodeInfo.subModules[i].dataMsgId; /**< Set CAN MSG ID */
-        pNew->DLC = 8; /**< Classic CAN always 8 bytes */
 
         uint8_t *pData = (uint8_t*)&pNew->payload; /**< Pointer to the payload */
+        
+        /** Default DLC to 8, though specific cases below will 
+         * override this with values from your CSV (e.g., 7U). 
+         */
+        pNew->DLC = (8U);
 
         /* Payload Bytes 0-3: The unique Node ID */
         *(uint32_t*)&pData[0] = __REV(nodeInfo.nodeID);
 
         /* Handle Float vs Integer based on Message ID */
         if (nodeInfo.subModules[i].modType == DATA_NODE_CPU_TEMP_ID) {
-            float temp = nodeInfo.subModules[i].data.fltValue;
-            /* Copy float bits into a uint32 for the byte swapper */
+            // float temp = nodeInfo.subModules[i].data.fltValue;
+            float temp = (19.70f); // Hardcoded for testing
             uint32_t raw_bits;
             memcpy(&raw_bits, &temp, 4);
-            *(uint32_t*)&pData[4] = __REV(raw_bits);
-            pNew->DLC = DATA_NODE_CPU_TEMP_DLC; /* set DLC based on message type */
-        } else if (nodeInfo.subModules[i].modType == DATA_ANALOG_KNOB_MV_ID) {
-            /* Standard integer for Knob */
-            *(uint32_t*)&pData[4] = __REV(nodeInfo.subModules[i].data.i32Value);
-            pNew->DLC = DATA_ANALOG_KNOB_MV_DLC; /* set DLC based on message type */
 
+            /** For DLC 7 messages, the 'sensor data' starts at Byte 4.
+             * If the sensor data is only 2 bytes (16-bit), we map it to 
+             * pData[4] and pData[5], leaving pData[6] and pData[7] as 0.
+             */
+            uint16_t out_val = (uint16_t)(raw_bits & 0xFFFF);
+            pData[4] = (uint8_t)((out_val >> 8) & 0xFF); /* MSB */
+            pData[5] = (uint8_t)(out_val & 0xFF);        /* LSB */
+            
+            /* Use the specific DLC defined in your constants (7U) */
+            pNew->DLC = DATA_NODE_CPU_TEMP_DLC; 
+
+        } else if (nodeInfo.subModules[i].modType == DATA_ANALOG_KNOB_MV_ID) {
+            /** DATA_ANALOG_KNOB_MV (0x518) uses DLC 7.
+             * Mapping 16-bit i32Value to Big-Endian at offset 4.
+             */
+            uint16_t knob_val = (uint16_t)(nodeInfo.subModules[i].data.i32Value & 0xFFFF);
+            pData[4] = (uint8_t)((knob_val >> 8) & 0xFF); /* MSB */
+            pData[5] = (uint8_t)(knob_val & 0xFF);        /* LSB */
+            
+            pNew->DLC = DATA_ANALOG_KNOB_MV_DLC; 
         }
 
         if (osMessagePut(canTxQueueHandle, (uint32_t)pNew, 0) != osOK) {
@@ -736,6 +757,24 @@ void StartCanRxTask(void const * argument) {
     }         
 }
 
+/* * Helper function to convert integer DLC to FDCAN length macros.
+ * FDCAN DLC is not a simple integer; it is a bit-shifted value.
+ */
+static uint32_t ConvertToFdcanDlc(uint8_t dlc) {
+    switch (dlc) {
+        case 0: return FDCAN_DLC_BYTES_0;
+        case 1: return FDCAN_DLC_BYTES_1;
+        case 2: return FDCAN_DLC_BYTES_2;
+        case 3: return FDCAN_DLC_BYTES_3;
+        case 4: return FDCAN_DLC_BYTES_4;
+        case 5: return FDCAN_DLC_BYTES_5;
+        case 6: return FDCAN_DLC_BYTES_6;
+        case 7: return FDCAN_DLC_BYTES_7;
+        case 8: return FDCAN_DLC_BYTES_8;
+        default: return FDCAN_DLC_BYTES_8;
+    }
+}
+
 /**
  * @brief  CAN Transmitter Task
  * @details  This task waits for pointers to CAN_Msg_t structures to be pushed into the canTxQueueHandle by other tasks.
@@ -770,12 +809,11 @@ void StartCanTxTask(void const * argument) {
             if (pMsg != NULL) {
                 txHeader.Identifier = pMsg->canID; /* Set the Message ID */
                 
-                if (pMsg->DLC > 8 || pMsg->DLC < 4) {
-                    txHeader.DataLength = FDCAN_DLC_BYTES_8; /* Set the DLC to 8 if there's a problem */
-                } 
-                else {
-                    txHeader.DataLength = (uint8_t)pMsg->DLC; /* Set the DLC from the queued message */
-                }
+                /** Use the conversion helper to set the correct HAL macro.
+                 * This ensures the hardware register receives the correct bit pattern
+                 * for how ever many bytes are needed the frame.
+                 */
+                txHeader.DataLength = ConvertToFdcanDlc(pMsg->DLC);
 
                 /* 3. Check for hardware space and transmit */
                 if (HAL_FDCAN_GetTxFifoFreeLevel(&hfdcan1) > 0) {
@@ -794,8 +832,6 @@ void StartCanTxTask(void const * argument) {
                 /* 4. IMPORTANT: Free the memory back to the pool so it can be reused */
                 osPoolFree(canMsgPoolHandle, pMsg);
             }
-
-
         }
     }
 }
